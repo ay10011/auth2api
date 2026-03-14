@@ -27,7 +27,7 @@ export function createChatCompletionsHandler(config: Config, manager: AccountMan
       }
 
       const stream = !!body.stream;
-      const model = resolveModel(body.model || "claude-sonnet-4-20250514");
+      const model = resolveModel(body.model || "claude-sonnet-4-5-20250929");
       const userAgent = req.headers["user-agent"] || "";
       const apiKey = extractApiKey(req.headers);
 

@@ -24,7 +24,7 @@ const EFFORT_TO_BUDGET: Record<string, number> = {
 // ── OpenAI Responses API request → Claude Messages request ──
 
 function responsesToClaude(body: any): any {
-  const model = resolveModel(body.model || "claude-sonnet-4-20250514");
+  const model = resolveModel(body.model || "claude-sonnet-4-5-20250929");
   const claudeBody: any = {
     model,
     max_tokens: body.max_output_tokens || 8192,
@@ -448,7 +448,7 @@ export function createResponsesHandler(config: Config, manager: AccountManager) 
       }
 
       const stream = !!body.stream;
-      const model = resolveModel(body.model || "claude-sonnet-4-20250514");
+      const model = resolveModel(body.model || "claude-sonnet-4-5-20250929");
       const userAgent = req.headers["user-agent"] || "";
       const apiKey = extractApiKey(req.headers);
 

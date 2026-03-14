@@ -89,7 +89,7 @@ curl http://127.0.0.1:8317/v1/chat/completions \
   -H "Authorization: Bearer <your-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-sonnet-4-5-20250929",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 1024
   }'
@@ -99,10 +99,13 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 | Model ID | Description |
 |----------|-------------|
-| `claude-sonnet-4-20250514` | Claude Sonnet 4 |
+| `claude-sonnet-4-5-20250929` | Claude Sonnet 4.5 |
+| `claude-haiku-4-5-20251001` | Claude Haiku 4.5 |
+| `claude-opus-4-1-20250805` | Claude Opus 4.1 |
 | `claude-opus-4-20250514` | Claude Opus 4 |
-| `claude-haiku-4-20250414` | Claude Haiku 4 |
-| `claude-3-5-sonnet-20241022` | Claude 3.5 Sonnet |
+| `claude-sonnet-4-20250514` | Claude Sonnet 4 |
+| `claude-3-7-sonnet-20250219` | Claude 3.7 Sonnet |
+| `claude-3-5-haiku-20241022` | Claude 3.5 Haiku |
 
 ### Endpoints
 
