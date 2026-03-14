@@ -2,21 +2,26 @@
 
 [中文](./README_CN.md)
 
-A lightweight proxy that converts Claude OAuth tokens into an OpenAI-compatible API, allowing you to use Claude models with any OpenAI-compatible client or directly with Claude Code.
+A lightweight single-account Claude OAuth to API proxy for Claude Code and OpenAI-compatible clients.
+
+auth2api is intentionally small and focused:
+
+- one Claude OAuth account
+- one local or self-hosted proxy
+- one simple goal: turn Claude OAuth access into a usable API endpoint
+
+It is not trying to be a multi-provider gateway or a large routing platform. If you want a compact, understandable proxy that is easy to run and modify, auth2api is built for that use case.
 
 ## Features
 
-- **OpenAI-compatible API** — drop-in replacement for OpenAI clients (`/v1/chat/completions`, `/v1/responses`, `/v1/models`)
-- **Claude native passthrough** — direct `/v1/messages` and `/v1/messages/count_tokens` endpoints
-- **Streaming support** — SSE streaming for both OpenAI and Claude native formats
-- **Thinking/reasoning** — maps `reasoning_effort` to Claude's extended thinking
-- **Tool calls** — full support for function calling, streaming and non-streaming
-- **Image support** — passes image_url content to Claude's vision API
-- **Single-account mode** — one Claude OAuth account with cooldown, refresh, and health tracking
-- **Auto token refresh** — refreshes OAuth tokens before expiry
-- **Claude Code compatible** — accepts both `Authorization: Bearer` and `x-api-key` headers
-- **Admin status endpoint** — inspect account health via `/admin/accounts`
-- **Security** — timing-safe API key validation, rate limiting (60 req/min per IP), localhost-only CORS
+- **Lightweight by design** — small codebase, single-account architecture, minimal moving parts
+- **Claude OAuth to API** — use one Claude OAuth login as an API-backed proxy account
+- **OpenAI-compatible API** — supports `/v1/chat/completions`, `/v1/responses`, and `/v1/models`
+- **Claude native passthrough** — supports `/v1/messages` and `/v1/messages/count_tokens`
+- **Claude Code friendly** — works with both `Authorization: Bearer` and `x-api-key`
+- **Streaming, tools, images, and reasoning** — covers the main Claude usage patterns without a large framework
+- **Single-account health handling** — cooldown, retry, token refresh, and `/admin/accounts` status
+- **Basic safety defaults** — timing-safe API key validation, per-IP rate limiting, localhost-only browser CORS
 
 ## Requirements
 

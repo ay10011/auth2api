@@ -2,21 +2,26 @@
 
 [English](./README.md)
 
-一个轻量级代理，可将 Claude OAuth token 转换为 OpenAI 兼容 API，让你可以在任意 OpenAI 兼容客户端中使用 Claude 模型，或者直接配合 Claude Code 使用。
+一个轻量级、单账号的 Claude OAuth 转 API 代理，适合 Claude Code 和 OpenAI 兼容客户端。
+
+auth2api 的定位很克制，也很明确：
+
+- 一个 Claude OAuth 账号
+- 一个本地或自托管代理
+- 一个目标：把 Claude OAuth 登录态变成可调用的 API
+
+它并不试图做成多 provider 网关，也不是大型路由平台。如果你想要的是一个体积小、容易理解、方便自己改的代理，auth2api 就是为这个场景准备的。
 
 ## 功能特性
 
-- **OpenAI 兼容 API**：可直接替换 OpenAI 客户端接口，支持 `/v1/chat/completions`、`/v1/responses`、`/v1/models`
-- **Claude 原生透传**：直接支持 `/v1/messages` 与 `/v1/messages/count_tokens`
-- **流式输出支持**：同时支持 OpenAI 与 Claude 原生格式的 SSE 流
-- **思考 / 推理支持**：将 `reasoning_effort` 映射到 Claude 的 extended thinking
-- **工具调用支持**：完整支持 function calling，包括流式与非流式
-- **图片支持**：将 `image_url` 内容转发到 Claude 视觉接口
-- **单账号模式**：仅使用一个 Claude OAuth 账号，并带有 cooldown、自动刷新与健康状态追踪
-- **自动 token 刷新**：在 OAuth token 过期前自动刷新
-- **Claude Code 兼容**：同时接受 `Authorization: Bearer` 和 `x-api-key`
-- **管理状态接口**：通过 `/admin/accounts` 查看账号健康状态
-- **安全性**：使用 timing-safe API key 校验、每 IP 每分钟 60 次限流、仅允许 localhost 浏览器 CORS
+- **轻量优先**：代码量小、单账号架构、依赖和运行逻辑都尽量简单
+- **Claude OAuth 转 API**：把一个 Claude OAuth 登录账号作为 API 代理账号使用
+- **OpenAI 兼容 API**：支持 `/v1/chat/completions`、`/v1/responses`、`/v1/models`
+- **Claude 原生透传**：支持 `/v1/messages` 与 `/v1/messages/count_tokens`
+- **适配 Claude Code**：兼容 `Authorization: Bearer` 和 `x-api-key`
+- **覆盖核心能力**：支持流式、工具调用、图片与 reasoning，而不引入大型框架
+- **单账号健康管理**：内置 cooldown、重试、token 刷新和 `/admin/accounts` 状态查看
+- **默认安全设置**：timing-safe API key 校验、每 IP 限流、仅允许 localhost 浏览器 CORS
 
 ## 运行要求
 
