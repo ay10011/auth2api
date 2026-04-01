@@ -8,40 +8,17 @@ const BASE_URL = "https://api.anthropic.com";
  * getAllModelBetas(). Real Claude Code sends different betas per model.
  */
 function buildBetaHeader(model: string, beta?: any): string {
-  const betas: string[] = [];
-
   const isHaiku = model.includes("haiku");
 
-  // 1. Non-Haiku models always get the Claude Code beta
-  if (!isHaiku) {
-    betas.push("claude-code-20250219");
+  if (isHaiku) {
+    return "interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15";
   }
 
   if (typeof beta === "string" && beta.includes("context-1m")) {
-    betas.push("context-1m-2025-08-07");
+    return "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24";
   }
 
-  // 2. OAuth users always get this
-  betas.push("oauth-2025-04-20");
-
-  // 3. Interleaved thinking — all models that support ISP
-  if (!isHaiku) {
-    betas.push("interleaved-thinking-2025-05-14");
-  }
-
-  betas.push("redact-thinking-2026-02-12");
-
-  // 4. Context management — 1P, claude-4+ models
-  betas.push("context-management-2025-06-27");
-
-  // 5. Prompt caching scope — always on 1P
-  betas.push("prompt-caching-scope-2026-01-05");
-
-  betas.push("advanced-tool-use-2025-11-20");
-
-  betas.push("effort-2025-11-24");
-
-  return betas.join(",");
+  return "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24";
 }
 
 /**
