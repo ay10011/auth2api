@@ -25,11 +25,19 @@ function buildBetaHeader(model: string): string {
     betas.push("interleaved-thinking-2025-05-14");
   }
 
+  betas.push("redact-thinking-2026-02-12");
+
   // 4. Context management — 1P, claude-4+ models
   betas.push("context-management-2025-06-27");
 
   // 5. Prompt caching scope — always on 1P
   betas.push("prompt-caching-scope-2026-01-05");
+
+  betas.push("advanced-tool-use-2025-11-20");
+
+  betas.push("advanced-tool-use-2025-11-20");
+
+  betas.push("effort-2025-11-24");
 
   return betas.join(",");
 }
@@ -130,6 +138,7 @@ function buildHeaders(
 
   // Override with extra headers (e.g. anthropic-* from claude-cli clients)
   if (extraHeaders) {
+    delete extraHeaders["anthropic-beta"];
     Object.assign(headers, extraHeaders);
   }
 
