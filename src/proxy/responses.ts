@@ -750,10 +750,14 @@ export function createResponsesHandler(
         if (parsed && typeof parsed === "object") {
           res.status(lastStatus).json(parsed);
         } else {
-          res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+          res
+            .status(lastStatus)
+            .json({ error: { message: "Upstream request failed" } });
         }
       } catch {
-        res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+        res
+          .status(lastStatus)
+          .json({ error: { message: "Upstream request failed" } });
       }
     } catch (err: any) {
       console.error("Responses handler error:", err.message);

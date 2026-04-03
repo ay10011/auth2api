@@ -69,9 +69,7 @@ export function createChatCompletionsHandler(
             total === 0
               ? "No available account"
               : "Rate limited on the configured account";
-          res
-            .status(status)
-            .json({ error: { message } });
+          res.status(status).json({ error: { message } });
           return;
         }
 
@@ -184,10 +182,14 @@ export function createChatCompletionsHandler(
         if (parsed && typeof parsed === "object") {
           res.status(lastStatus).json(parsed);
         } else {
-          res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+          res
+            .status(lastStatus)
+            .json({ error: { message: "Upstream request failed" } });
         }
       } catch {
-        res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+        res
+          .status(lastStatus)
+          .json({ error: { message: "Upstream request failed" } });
       }
     } catch (err: any) {
       console.error("Handler error:", err.message);

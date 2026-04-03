@@ -213,10 +213,14 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
         if (parsed && typeof parsed === "object") {
           res.status(lastStatus).json(parsed);
         } else {
-          res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+          res
+            .status(lastStatus)
+            .json({ error: { message: "Upstream request failed" } });
         }
       } catch {
-        res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+        res
+          .status(lastStatus)
+          .json({ error: { message: "Upstream request failed" } });
       }
     } catch (err: any) {
       console.error("Messages handler error:", err.message);
@@ -317,10 +321,14 @@ export function createCountTokensHandler(
         if (parsed && typeof parsed === "object") {
           res.status(lastStatus).json(parsed);
         } else {
-          res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+          res
+            .status(lastStatus)
+            .json({ error: { message: "Upstream request failed" } });
         }
       } catch {
-        res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+        res
+          .status(lastStatus)
+          .json({ error: { message: "Upstream request failed" } });
       }
     } catch (err: any) {
       console.error("Count tokens error:", err.message);
