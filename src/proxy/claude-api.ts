@@ -159,23 +159,6 @@ export async function callClaudeAPI(
     signal: AbortSignal.timeout(timeoutMs),
   });
 
-  // Log error details if request failed
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error("=".repeat(80));
-    console.error("CLAUDE API REQUEST FAILED");
-    console.error("=".repeat(80));
-    console.error("Status:", response.status, response.statusText);
-    console.error("URL:", url);
-    console.error("\n--- Request Headers ---");
-    console.error(JSON.stringify(headers, null, 2));
-    console.error("\n--- Request Body ---");
-    console.error(JSON.stringify(body, null, 2));
-    console.error("\n--- Response Body ---");
-    console.error(errorBody);
-    console.error("=".repeat(80));
-  }
-
   return response;
 }
 
@@ -203,23 +186,6 @@ export async function callClaudeCountTokens(
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeouts["count-tokens-ms"]),
   });
-
-  // Log error details if request failed
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error("=".repeat(80));
-    console.error("CLAUDE COUNT_TOKENS API REQUEST FAILED");
-    console.error("=".repeat(80));
-    console.error("Status:", response.status, response.statusText);
-    console.error("URL:", url);
-    console.error("\n--- Request Headers ---");
-    console.error(JSON.stringify(headers, null, 2));
-    console.error("\n--- Request Body ---");
-    console.error(JSON.stringify(body, null, 2));
-    console.error("\n--- Response Body ---");
-    console.error(errorBody);
-    console.error("=".repeat(80));
-  }
 
   return response;
 }

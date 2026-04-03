@@ -586,6 +586,7 @@ export function createResponsesHandler(
       const translatedBody = responsesToClaude(body);
 
       let lastStatus = 500;
+      let lastErrBody = "";
       const refreshedAccounts = new Set<string>();
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         const { account, total } = manager.getNextAccount();
@@ -718,10 +719,10 @@ export function createResponsesHandler(
         }
 
         lastStatus = upstreamResp.status;
+        lastErrBody = await upstreamResp.text().catch(() => "");
         if (isDebugLevel(config.debug, "errors")) {
-          const errText = await upstreamResp.text().catch(() => "");
           console.error(
-            `Responses attempt ${attempt + 1} failed (${lastStatus}): ${errText}`,
+            `Responses attempt ${attempt + 1} failed (${lastStatus}): ${lastErrBody}`,
           );
         }
 
@@ -744,11 +745,16 @@ export function createResponsesHandler(
         }
       }
 
-      const clientMsg =
-        lastStatus === 429
-          ? "Rate limited on the configured account"
-          : "Upstream request failed";
-      res.status(lastStatus).json({ error: { message: clientMsg } });
+      try {
+        const parsed = lastErrBody ? JSON.parse(lastErrBody) : null;
+        if (parsed && typeof parsed === "object") {
+          res.status(lastStatus).json(parsed);
+        } else {
+          res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+        }
+      } catch {
+        res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+      }
     } catch (err: any) {
       console.error("Responses handler error:", err.message);
       res.status(500).json({ error: { message: "Internal server error" } });

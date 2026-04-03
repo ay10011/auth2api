@@ -28,7 +28,6 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
       ) {
         res.status(400).json({
           error: {
-            type: "invalid_request_error",
             message: "messages is required and must be a non-empty array",
           },
         });
@@ -67,6 +66,7 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
       }
 
       let lastStatus = 500;
+      let lastErrBody = "";
       const refreshedAccounts = new Set<string>();
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         const { account, total } = manager.getNextAccount();
@@ -76,7 +76,7 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
             total === 0
               ? "No available account"
               : "Rate limited on the configured account";
-          res.status(status).json({ error: { type: "api_error", message } });
+          res.status(status).json({ error: { message } });
           return;
         }
 
@@ -121,7 +121,7 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
             continue;
           }
           res.status(502).json({
-            error: { type: "api_error", message: "Upstream network error" },
+            error: { message: "Upstream network error" },
           });
           return;
         }
@@ -179,10 +179,10 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
 
         lastStatus = upstreamResp.status;
         try {
-          const errText = await upstreamResp.text();
+          lastErrBody = await upstreamResp.text();
           if (isDebugLevel(config.debug, "errors")) {
             console.error(
-              `Messages attempt ${attempt + 1} failed (${lastStatus}): ${errText}`,
+              `Messages attempt ${attempt + 1} failed (${lastStatus}): ${lastErrBody}`,
             );
           }
         } catch {
@@ -208,17 +208,20 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
         }
       }
 
-      const clientMsg =
-        lastStatus === 429
-          ? "Rate limited on the configured account"
-          : "Upstream request failed";
-      res
-        .status(lastStatus)
-        .json({ error: { type: "api_error", message: clientMsg } });
+      try {
+        const parsed = lastErrBody ? JSON.parse(lastErrBody) : null;
+        if (parsed && typeof parsed === "object") {
+          res.status(lastStatus).json(parsed);
+        } else {
+          res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+        }
+      } catch {
+        res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+      }
     } catch (err: any) {
       console.error("Messages handler error:", err.message);
       res.status(500).json({
-        error: { type: "api_error", message: "Internal server error" },
+        error: { message: "Internal server error" },
       });
     }
   };
@@ -238,6 +241,7 @@ export function createCountTokensHandler(
         .digest("hex");
 
       let lastStatus = 500;
+      let lastErrBody = "";
       const refreshedAccounts = new Set<string>();
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         const { account, total } = manager.getNextAccount();
@@ -247,7 +251,7 @@ export function createCountTokensHandler(
             total === 0
               ? "No available account"
               : "Rate limited on the configured account";
-          res.status(status).json({ error: { type: "api_error", message } });
+          res.status(status).json({ error: { message } });
           return;
         }
 
@@ -274,7 +278,7 @@ export function createCountTokensHandler(
             continue;
           }
           res.status(502).json({
-            error: { type: "api_error", message: "Upstream network error" },
+            error: { message: "Upstream network error" },
           });
           return;
         }
@@ -287,6 +291,7 @@ export function createCountTokensHandler(
         }
 
         lastStatus = upstreamResp.status;
+        lastErrBody = await upstreamResp.text().catch(() => "");
         if (lastStatus === 401) {
           const refreshed = await manager.refreshAccount(account.token.email);
           if (refreshed && !refreshedAccounts.has(account.token.email)) {
@@ -307,13 +312,20 @@ export function createCountTokensHandler(
         }
       }
 
-      res.status(lastStatus).json({
-        error: { type: "api_error", message: "Token counting failed" },
-      });
+      try {
+        const parsed = lastErrBody ? JSON.parse(lastErrBody) : null;
+        if (parsed && typeof parsed === "object") {
+          res.status(lastStatus).json(parsed);
+        } else {
+          res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+        }
+      } catch {
+        res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+      }
     } catch (err: any) {
       console.error("Count tokens error:", err.message);
       res.status(500).json({
-        error: { type: "api_error", message: "Internal server error" },
+        error: { message: "Internal server error" },
       });
     }
   };

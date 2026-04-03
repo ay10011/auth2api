@@ -59,6 +59,7 @@ export function createChatCompletionsHandler(
 
       // Retry with account switching on retryable errors
       let lastStatus = 500;
+      let lastErrBody = "";
       const refreshedAccounts = new Set<string>();
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         const { account, total } = manager.getNextAccount();
@@ -70,7 +71,7 @@ export function createChatCompletionsHandler(
               : "Rate limited on the configured account";
           res
             .status(status)
-            .json({ error: { message, type: "upstream_error" } });
+            .json({ error: { message } });
           return;
         }
 
@@ -113,10 +114,7 @@ export function createChatCompletionsHandler(
             continue;
           }
           res.status(502).json({
-            error: {
-              message: "Upstream network error",
-              type: "upstream_error",
-            },
+            error: { message: "Upstream network error" },
           });
           return;
         }
@@ -148,10 +146,10 @@ export function createChatCompletionsHandler(
 
         lastStatus = upstreamResp.status;
         try {
-          const errText = await upstreamResp.text();
+          lastErrBody = await upstreamResp.text();
           if (isDebugLevel(config.debug, "errors")) {
             console.error(
-              `Attempt ${attempt + 1} failed (${lastStatus}): ${errText}`,
+              `Attempt ${attempt + 1} failed (${lastStatus}): ${lastErrBody}`,
             );
           }
         } catch {
@@ -181,15 +179,16 @@ export function createChatCompletionsHandler(
         }
       }
 
-      const clientMsg =
-        lastStatus === 429
-          ? "Rate limited on the configured account"
-          : lastStatus === 401
-            ? "Authentication error"
-            : "Upstream request failed";
-      res
-        .status(lastStatus)
-        .json({ error: { message: clientMsg, type: "upstream_error" } });
+      try {
+        const parsed = lastErrBody ? JSON.parse(lastErrBody) : null;
+        if (parsed && typeof parsed === "object") {
+          res.status(lastStatus).json(parsed);
+        } else {
+          res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+        }
+      } catch {
+        res.status(lastStatus).json({ error: { message: "Upstream request failed" } });
+      }
     } catch (err: any) {
       console.error("Handler error:", err.message);
       res.status(500).json({ error: { message: "Internal server error" } });
