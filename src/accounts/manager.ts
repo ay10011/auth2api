@@ -6,9 +6,17 @@ import { getDeviceId } from "../proxy/cloak-utils";
 const REFRESH_LEAD_MS = 4 * 60 * 60 * 1000; // 4 hours before expiry
 const REFRESH_CHECK_INTERVAL_MS = 60 * 1000; // check every 60s
 
-export type AccountFailureKind = "rate_limit" | "auth" | "forbidden" | "server" | "network";
+export type AccountFailureKind =
+  | "rate_limit"
+  | "auth"
+  | "forbidden"
+  | "server"
+  | "network";
 
-const FAILURE_BACKOFF: Record<AccountFailureKind, { baseMs: number; maxMs: number }> = {
+const FAILURE_BACKOFF: Record<
+  AccountFailureKind,
+  { baseMs: number; maxMs: number }
+> = {
   rate_limit: { baseMs: 60 * 1000, maxMs: 15 * 60 * 1000 },
   auth: { baseMs: 10 * 60 * 1000, maxMs: 60 * 60 * 1000 },
   forbidden: { baseMs: 10 * 60 * 1000, maxMs: 60 * 60 * 1000 },
@@ -47,21 +55,27 @@ export interface AccountSnapshot {
   refreshing: boolean;
 }
 
-export interface AccountSelection {
-  token: TokenData;
-  deviceId: string;
-  accountUuid: string;
+export interface AccountResult {
+  account: {
+    token: TokenData;
+    deviceId: string;
+    accountUuid: string;
+  } | null;
+  total: number;
 }
 
-export type AccountAvailability =
-  | { state: "missing" }
-  | { state: "available"; email: string }
-  | { state: "cooldown"; email: string; cooldownUntil: number; lastError: string | null };
+const STICKY_MIN_MS = 20 * 60 * 1000; // 20 minutes
+const STICKY_MAX_MS = 60 * 60 * 1000; // 60 minutes
+
+function randomStickyDuration(): number {
+  return STICKY_MIN_MS + Math.random() * (STICKY_MAX_MS - STICKY_MIN_MS);
+}
 
 export class AccountManager {
   private accounts: Map<string, AccountState> = new Map();
   private accountOrder: string[] = []; // emails in insertion order for round-robin
   private lastUsedIndex: number = -1;
+  private stickyUntil: number = 0; // timestamp until which current account is sticky
   private authDir: string;
   private refreshTimer: NodeJS.Timeout | null = null;
   private refreshing = false;
@@ -101,53 +115,52 @@ export class AccountManager {
   }
 
   /**
-   * Round-robin account selection. Picks the next available (non-cooldown) account
-   * starting from the one after the last used. Returns null if all are in cooldown.
+   * Sticky account selection. Keeps using the same account for STICKY_DURATION_MS
+   * before rotating to the next one. Rotates early only when the current account
+   * enters cooldown (e.g. rate-limited).
    */
-  getNextAccount(): AccountSelection | null {
+  getNextAccount(): AccountResult {
     const count = this.accountOrder.length;
-    if (count === 0) return null;
+    if (count === 0) return { account: null, total: 0 };
 
     const now = Date.now();
+
+    // Try to keep using the current sticky account
+    if (this.lastUsedIndex >= 0 && now < this.stickyUntil) {
+      const email = this.accountOrder[this.lastUsedIndex];
+      const acct = this.accounts.get(email)!;
+      if (acct.cooldownUntil <= now) {
+        return {
+          account: {
+            token: acct.token,
+            deviceId: getDeviceId(this.authDir, email),
+            accountUuid: acct.token.accountUuid,
+          },
+          total: count,
+        };
+      }
+    }
+
+    // Pick the next available account
+    const startIdx = this.lastUsedIndex >= 0 ? this.lastUsedIndex + 1 : 0;
     for (let i = 0; i < count; i++) {
-      const idx = (this.lastUsedIndex + 1 + i) % count;
+      const idx = (startIdx + i) % count;
       const email = this.accountOrder[idx];
       const acct = this.accounts.get(email)!;
       if (acct.cooldownUntil <= now) {
         this.lastUsedIndex = idx;
+        this.stickyUntil = now + randomStickyDuration();
         return {
-          token: acct.token,
-          deviceId: getDeviceId(this.authDir, email),
-          accountUuid: acct.token.accountUuid,
+          account: {
+            token: acct.token,
+            deviceId: getDeviceId(this.authDir, email),
+            accountUuid: acct.token.accountUuid,
+          },
+          total: count,
         };
       }
     }
-    return null;
-  }
-
-  getAvailability(): AccountAvailability {
-    if (this.accounts.size === 0) {
-      return { state: "missing" };
-    }
-
-    const now = Date.now();
-    let soonestCooldown: AccountState | null = null;
-
-    for (const acct of this.accounts.values()) {
-      if (acct.cooldownUntil <= now) {
-        return { state: "available", email: acct.token.email };
-      }
-      if (!soonestCooldown || acct.cooldownUntil < soonestCooldown.cooldownUntil) {
-        soonestCooldown = acct;
-      }
-    }
-
-    return {
-      state: "cooldown",
-      email: soonestCooldown!.token.email,
-      cooldownUntil: soonestCooldown!.cooldownUntil,
-      lastError: soonestCooldown!.lastError,
-    };
+    return { account: null, total: count };
   }
 
   recordAttempt(email: string): void {
@@ -169,7 +182,11 @@ export class AccountManager {
     acct.totalSuccesses++;
   }
 
-  recordFailure(email: string, kind: AccountFailureKind, detail?: string): void {
+  recordFailure(
+    email: string,
+    kind: AccountFailureKind,
+    detail?: string,
+  ): void {
     const acct = this.accounts.get(email);
     if (!acct) return;
 
@@ -179,9 +196,14 @@ export class AccountManager {
     acct.lastError = detail ? `${kind}: ${detail}` : kind;
 
     const { baseMs, maxMs } = FAILURE_BACKOFF[kind];
-    const cooldownMs = Math.min(baseMs * 2 ** Math.max(0, acct.failureCount - 1), maxMs);
+    const cooldownMs = Math.min(
+      baseMs * 2 ** Math.max(0, acct.failureCount - 1),
+      maxMs,
+    );
     acct.cooldownUntil = Date.now() + cooldownMs;
-    console.log(`Account ${email} cooled down for ${Math.round(cooldownMs / 1000)}s (${kind})`);
+    console.log(
+      `Account ${email} cooled down for ${Math.round(cooldownMs / 1000)}s (${kind})`,
+    );
   }
 
   async refreshAccount(email: string): Promise<boolean> {
@@ -220,12 +242,17 @@ export class AccountManager {
 
   startAutoRefresh(): void {
     const timer = setInterval(
-      () => this.refreshAll().catch((err) => console.error("Refresh cycle failed:", err.message)),
-      REFRESH_CHECK_INTERVAL_MS
+      () =>
+        this.refreshAll().catch((err) =>
+          console.error("Refresh cycle failed:", err.message),
+        ),
+      REFRESH_CHECK_INTERVAL_MS,
     );
     timer.unref();
     this.refreshTimer = timer;
-    this.refreshAll().catch((err) => console.error("Initial refresh failed:", err.message));
+    this.refreshAll().catch((err) =>
+      console.error("Initial refresh failed:", err.message),
+    );
   }
 
   stopAutoRefresh(): void {
@@ -275,7 +302,9 @@ export class AccountManager {
       return true;
     } catch (err: any) {
       this.recordFailure(acct.token.email, "auth", err.message);
-      console.error(`Token refresh failed for ${acct.token.email}: ${err.message}`);
+      console.error(
+        `Token refresh failed for ${acct.token.email}: ${err.message}`,
+      );
       return false;
     } finally {
       acct.refreshing = false;

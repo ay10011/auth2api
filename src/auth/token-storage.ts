@@ -26,15 +26,21 @@ export function storageToToken(storage: TokenStorage): TokenData {
 
 export function saveToken(authDir: string, data: TokenData): void {
   fs.mkdirSync(authDir, { recursive: true, mode: 0o700 });
-  const sanitized = data.email.replace(/[^a-zA-Z0-9@._-]/g, "_").replace(/\.\./g, "_");
+  const sanitized = data.email
+    .replace(/[^a-zA-Z0-9@._-]/g, "_")
+    .replace(/\.\./g, "_");
   const filename = `claude-${sanitized}.json`;
   const filePath = path.join(authDir, filename);
-  fs.writeFileSync(filePath, JSON.stringify(tokenToStorage(data), null, 2), { mode: 0o600 });
+  fs.writeFileSync(filePath, JSON.stringify(tokenToStorage(data), null, 2), {
+    mode: 0o600,
+  });
 }
 
 export function loadAllTokens(authDir: string): TokenData[] {
   if (!fs.existsSync(authDir)) return [];
-  const files = fs.readdirSync(authDir).filter((f) => f.startsWith("claude-") && f.endsWith(".json"));
+  const files = fs
+    .readdirSync(authDir)
+    .filter((f) => f.startsWith("claude-") && f.endsWith(".json"));
   const tokens: TokenData[] = [];
   for (const file of files) {
     try {

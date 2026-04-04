@@ -3,12 +3,12 @@ import { v4 as uuidv4 } from "uuid";
 // ── Model alias resolution ──
 
 const MODEL_ALIASES: Record<string, string> = {
-  opus:                      "claude-opus-4-6",
-  sonnet:                    "claude-sonnet-4-6",
-  haiku:                     "claude-haiku-4-5-20251001",
-  "claude-opus-4-6":         "claude-opus-4-6",
-  "claude-sonnet-4-6":       "claude-sonnet-4-6",
-  "claude-haiku-4-5":        "claude-haiku-4-5-20251001",
+  opus: "claude-opus-4-6",
+  sonnet: "claude-sonnet-4-6",
+  haiku: "claude-haiku-4-5-20251001",
+  "claude-opus-4-6": "claude-opus-4-6",
+  "claude-sonnet-4-6": "claude-sonnet-4-6",
+  "claude-haiku-4-5": "claude-haiku-4-5-20251001",
 };
 
 export function resolveModel(model: string): string {
@@ -18,7 +18,11 @@ export function resolveModel(model: string): string {
 // ── Reasoning effort → Claude thinking config ──
 
 const EFFORT_TO_BUDGET: Record<string, number> = {
-  none: 0, low: 1024, medium: 8192, high: 24576, xhigh: 32768,
+  none: 0,
+  low: 1024,
+  medium: 8192,
+  high: 24576,
+  xhigh: 32768,
 };
 
 function applyThinking(claudeBody: any, reasoningEffort: string): void {
@@ -89,7 +93,10 @@ function convertTools(tools: any[]): any[] {
       return {
         name: t.function.name,
         description: t.function.description || "",
-        input_schema: t.function.parameters || { type: "object", properties: {} },
+        input_schema: t.function.parameters || {
+          type: "object",
+          properties: {},
+        },
       };
     }
     return t;
@@ -107,7 +114,10 @@ export function openaiToClaude(body: any): any {
 
   if (body.temperature !== undefined) claudeBody.temperature = body.temperature;
   if (body.top_p !== undefined) claudeBody.top_p = body.top_p;
-  if (body.stop) claudeBody.stop_sequences = Array.isArray(body.stop) ? body.stop : [body.stop];
+  if (body.stop)
+    claudeBody.stop_sequences = Array.isArray(body.stop)
+      ? body.stop
+      : [body.stop];
 
   // Thinking / reasoning
   if (body.reasoning_effort) {
@@ -119,32 +129,43 @@ export function openaiToClaude(body: any): any {
 
   for (const msg of body.messages || []) {
     if (msg.role === "system") {
-      const text = typeof msg.content === "string"
-        ? msg.content
-        : msg.content?.map((c: any) => c.text).join("\n");
+      const text =
+        typeof msg.content === "string"
+          ? msg.content
+          : msg.content?.map((c: any) => c.text).join("\n");
       systemParts.push({ type: "text", text });
     } else if (msg.role === "tool") {
       // OpenAI tool result → Claude tool_result
       messages.push({
         role: "user",
-        content: [{
-          type: "tool_result",
-          tool_use_id: msg.tool_call_id,
-          content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
-        }],
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: msg.tool_call_id,
+            content:
+              typeof msg.content === "string"
+                ? msg.content
+                : JSON.stringify(msg.content),
+          },
+        ],
       });
     } else if (msg.role === "assistant" && msg.tool_calls) {
       // Assistant message with tool_calls → Claude assistant with tool_use blocks
       const content: any[] = [];
       if (msg.content) {
-        content.push({ type: "text", text: typeof msg.content === "string" ? msg.content : "" });
+        content.push({
+          type: "text",
+          text: typeof msg.content === "string" ? msg.content : "",
+        });
       }
       for (const tc of msg.tool_calls) {
         content.push({
           type: "tool_use",
           id: tc.id,
           name: tc.function?.name || "",
-          input: tc.function?.arguments ? JSON.parse(tc.function.arguments) : {},
+          input: tc.function?.arguments
+            ? JSON.parse(tc.function.arguments)
+            : {},
         });
       }
       messages.push({ role: "assistant", content });
@@ -166,7 +187,8 @@ export function openaiToClaude(body: any): any {
 
   // Tools
   if (body.tools) claudeBody.tools = convertTools(body.tools);
-  if (body.tool_choice) claudeBody.tool_choice = convertToolChoice(body.tool_choice);
+  if (body.tool_choice)
+    claudeBody.tool_choice = convertToolChoice(body.tool_choice);
 
   // Disable thinking when tool_choice forces tool use
   if (claudeBody.thinking && claudeBody.tool_choice) {
@@ -217,15 +239,19 @@ export function claudeToOpenai(claudeResp: any, model: string): any {
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model,
-    choices: [{
-      index: 0,
-      message,
-      finish_reason: mapStopReason(claudeResp.stop_reason),
-    }],
+    choices: [
+      {
+        index: 0,
+        message,
+        finish_reason: mapStopReason(claudeResp.stop_reason),
+      },
+    ],
     usage: {
       prompt_tokens: claudeResp.usage?.input_tokens || 0,
       completion_tokens: claudeResp.usage?.output_tokens || 0,
-      total_tokens: (claudeResp.usage?.input_tokens || 0) + (claudeResp.usage?.output_tokens || 0),
+      total_tokens:
+        (claudeResp.usage?.input_tokens || 0) +
+        (claudeResp.usage?.output_tokens || 0),
     },
   };
 }
@@ -248,7 +274,12 @@ export function createStreamState(model: string): StreamState {
   };
 }
 
-function makeChunk(state: StreamState, delta: any, finishReason: string | null, usage?: any): string {
+function makeChunk(
+  state: StreamState,
+  delta: any,
+  finishReason: string | null,
+  usage?: any,
+): string {
   const chunk: any = {
     id: state.chatId,
     object: "chat.completion.chunk",
@@ -265,7 +296,7 @@ function makeChunk(state: StreamState, delta: any, finishReason: string | null, 
 export function claudeStreamEventToOpenai(
   event: string,
   data: any,
-  state: StreamState
+  state: StreamState,
 ): string[] {
   const chunks: string[] = [];
 
@@ -278,15 +309,27 @@ export function claudeStreamEventToOpenai(
     const block = data.content_block;
     if (block?.type === "tool_use") {
       const idx = state.nextToolIndex++;
-      state.toolCalls.set(data.index, { id: block.id, name: block.name, args: "" });
-      chunks.push(makeChunk(state, {
-        tool_calls: [{
-          index: idx,
-          id: block.id,
-          type: "function",
-          function: { name: block.name, arguments: "" },
-        }],
-      }, null));
+      state.toolCalls.set(data.index, {
+        id: block.id,
+        name: block.name,
+        args: "",
+      });
+      chunks.push(
+        makeChunk(
+          state,
+          {
+            tool_calls: [
+              {
+                index: idx,
+                id: block.id,
+                type: "function",
+                function: { name: block.name, arguments: "" },
+              },
+            ],
+          },
+          null,
+        ),
+      );
     }
     // thinking / redacted_thinking block start — no output needed
     return chunks;
@@ -299,7 +342,9 @@ export function claudeStreamEventToOpenai(
       chunks.push(makeChunk(state, { content: data.delta.text }, null));
     } else if (deltaType === "thinking_delta") {
       // Emit as reasoning_content for clients that support it
-      chunks.push(makeChunk(state, { reasoning_content: data.delta.thinking }, null));
+      chunks.push(
+        makeChunk(state, { reasoning_content: data.delta.thinking }, null),
+      );
     } else if (deltaType === "redacted_thinking_delta") {
       // Redacted (encrypted) thinking blocks — discard, never forward to clients
     } else if (deltaType === "input_json_delta") {
@@ -312,12 +357,20 @@ export function claudeStreamEventToOpenai(
           if (blockIdx === data.index) break;
           tcIdx++;
         }
-        chunks.push(makeChunk(state, {
-          tool_calls: [{
-            index: tcIdx,
-            function: { arguments: data.delta.partial_json },
-          }],
-        }, null));
+        chunks.push(
+          makeChunk(
+            state,
+            {
+              tool_calls: [
+                {
+                  index: tcIdx,
+                  function: { arguments: data.delta.partial_json },
+                },
+              ],
+            },
+            null,
+          ),
+        );
       }
     }
     return chunks;
@@ -330,11 +383,14 @@ export function claudeStreamEventToOpenai(
 
   if (event === "message_delta") {
     const finishReason = mapStopReason(data.delta?.stop_reason || "end_turn");
-    const usage = data.usage ? {
-      prompt_tokens: data.usage.input_tokens || 0,
-      completion_tokens: data.usage.output_tokens || 0,
-      total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0),
-    } : undefined;
+    const usage = data.usage
+      ? {
+          prompt_tokens: data.usage.input_tokens || 0,
+          completion_tokens: data.usage.output_tokens || 0,
+          total_tokens:
+            (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0),
+        }
+      : undefined;
     chunks.push(makeChunk(state, {}, finishReason, usage));
     return chunks;
   }

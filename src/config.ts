@@ -54,11 +54,15 @@ const DEFAULT_CONFIG: Config = {
 function normalizeDebugMode(value: unknown): DebugMode {
   if (value === true) return "errors";
   if (value === false || value == null) return "off";
-  if (value === "off" || value === "errors" || value === "verbose") return value;
+  if (value === "off" || value === "errors" || value === "verbose")
+    return value;
   return "off";
 }
 
-export function isDebugLevel(debug: DebugMode, level: Exclude<DebugMode, "off">): boolean {
+export function isDebugLevel(
+  debug: DebugMode,
+  level: Exclude<DebugMode, "off">,
+): boolean {
   if (debug === "verbose") return true;
   return debug === level;
 }
@@ -93,14 +97,18 @@ export function loadConfig(configPath?: string): Config {
     };
   }
 
-  config.debug = normalizeDebugMode((config as Config & { debug?: unknown }).debug);
+  config.debug = normalizeDebugMode(
+    (config as Config & { debug?: unknown }).debug,
+  );
 
   // Auto-generate API key if none configured
   if (!config["api-keys"] || config["api-keys"].length === 0) {
     const key = generateApiKey();
     config["api-keys"] = [key];
     // Write config with generated key
-    fs.writeFileSync(filePath, yaml.dump(config, { lineWidth: -1 }), { mode: 0o600 });
+    fs.writeFileSync(filePath, yaml.dump(config, { lineWidth: -1 }), {
+      mode: 0o600,
+    });
     console.log(`\nGenerated API key (saved to ${filePath}):\n\n  ${key}\n`);
   }
 

@@ -9,7 +9,7 @@ export interface StreamResult {
 export async function handleStreamingResponse(
   upstreamResp: Response,
   res: ExpressResponse,
-  model: string
+  model: string,
 ): Promise<StreamResult> {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");

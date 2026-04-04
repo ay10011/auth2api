@@ -12,7 +12,10 @@ const SUCCESS_HTML = `<!DOCTYPE html>
 <p>You can close this tab and return to the terminal.</p>
 </body></html>`;
 
-export function waitForCallback(port = 54545, timeoutMs = 300000): Promise<CallbackResult> {
+export function waitForCallback(
+  port = 54545,
+  timeoutMs = 300000,
+): Promise<CallbackResult> {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       const url = new URL(req.url || "/", `http://localhost:${port}`);
@@ -60,7 +63,9 @@ export function waitForCallback(port = 54545, timeoutMs = 300000): Promise<Callb
     }
 
     server.listen(port, "127.0.0.1", () => {
-      console.log(`OAuth callback server listening on http://127.0.0.1:${port}`);
+      console.log(
+        `OAuth callback server listening on http://127.0.0.1:${port}`,
+      );
     });
   });
 }

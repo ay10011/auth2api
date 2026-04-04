@@ -1,6 +1,7 @@
-export function extractApiKey(
-  headers: { authorization?: string; "x-api-key"?: string | string[] }
-): string {
+export function extractApiKey(headers: {
+  authorization?: string;
+  "x-api-key"?: string | string[];
+}): string {
   const auth = headers.authorization;
   if (auth?.startsWith("Bearer ")) {
     return auth.slice(7);

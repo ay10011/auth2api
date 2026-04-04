@@ -4,51 +4,21 @@ import { CloakingConfig, TimeoutConfig } from "../config";
 const BASE_URL = "https://api.anthropic.com";
 
 /**
- * Check if model has 1M context support via [1m] suffix.
- * Mirrors Claude Code's has1mContext() in utils/context.ts
- */
-function has1mContext(model: string): boolean {
-  return /\[1m\]/i.test(model);
-}
-
-/**
  * Dynamic Anthropic-Beta construction — mirrors Claude Code's utils/betas.ts
  * getAllModelBetas(). Real Claude Code sends different betas per model.
- *
- * For external (non-Anthropic) OAuth users the typical set is:
- *   claude-code, oauth, interleaved-thinking, context-management,
- *   prompt-caching-scope, and context-1m for large-context models.
  */
-function buildBetaHeader(model: string): string {
-  const betas: string[] = [];
-
+function buildBetaHeader(model: string, beta?: any): string {
   const isHaiku = model.includes("haiku");
 
-  // 1. Non-Haiku models always get the Claude Code beta
-  if (!isHaiku) {
-    betas.push("claude-code-20250219");
+  if (isHaiku) {
+    return "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15";
   }
 
-  // 2. OAuth users always get this
-  betas.push("oauth-2025-04-20");
-
-  // 3. 1M context models — detected via [1m] suffix (Claude Code behavior)
-  if (has1mContext(model)) {
-    betas.push("context-1m-2025-08-07");
+  if (typeof beta === "string" && beta.includes("context-1m")) {
+    return "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24";
   }
 
-  // 4. Interleaved thinking — all models that support ISP
-  if (!isHaiku) {
-    betas.push("interleaved-thinking-2025-05-14");
-  }
-
-  // 5. Context management — 1P, claude-4+ models
-  betas.push("context-management-2025-06-27");
-
-  // 6. Prompt caching scope — always on 1P
-  betas.push("prompt-caching-scope-2026-01-05");
-
-  return betas.join(",");
+  return "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24";
 }
 
 /**
@@ -87,24 +57,13 @@ function getStainlessOs(): string {
  * after SESSION_TTL_MS of inactivity so repeated use still looks like a human
  * reopening their terminal periodically.
  */
-const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes of inactivity → new session
-
-interface SessionEntry {
-  id: string;
-  lastUsed: number;
-}
-
-const sessionMap = new Map<string, SessionEntry>();
+const sessionMap = new Map<string, string>();
 
 export function getSessionId(apiKeyHash: string): string {
-  const now = Date.now();
-  const entry = sessionMap.get(apiKeyHash);
-  if (entry && now - entry.lastUsed < SESSION_TTL_MS) {
-    entry.lastUsed = now;
-    return entry.id;
-  }
+  const existing = sessionMap.get(apiKeyHash);
+  if (existing) return existing;
   const id = crypto.randomUUID();
-  sessionMap.set(apiKeyHash, { id, lastUsed: now });
+  sessionMap.set(apiKeyHash, id);
   return id;
 }
 
@@ -124,6 +83,7 @@ function buildHeaders(
   model: string,
   cloaking: CloakingConfig,
   apiKeyHash?: string,
+  extraHeaders?: Record<string, string>,
 ): Record<string, string> {
   const cliVersion = cloaking["cli-version"] || DEFAULT_CLI_VERSION;
   const entrypoint = cloaking.entrypoint || DEFAULT_ENTRYPOINT;
@@ -148,22 +108,24 @@ function buildHeaders(
     "X-Stainless-Retry-Count": "0",
     Accept: stream ? "text/event-stream" : "application/json",
     // Lowercase headers
+    "anthropic-dangerous-direct-browser-access": "true",
     "anthropic-version": "2023-06-01",
-    "anthropic-beta": buildBetaHeader(model),
     "x-app": "cli",
     "x-client-request-id": crypto.randomUUID(),
   };
 
-  return headers;
-}
+  // Override with extra headers (e.g. anthropic-* from claude-cli clients)
+  if (extraHeaders) {
+    Object.assign(headers, extraHeaders);
+    headers["anthropic-beta"] = buildBetaHeader(
+      model,
+      extraHeaders["anthropic-beta"],
+    );
+  } else {
+    headers["anthropic-beta"] = buildBetaHeader(model);
+  }
 
-/**
- * Normalize model string for API request.
- * Strips [1m] and [2m] suffixes (context window markers) before sending to Anthropic API.
- * Mirrors Claude Code's normalizeModelStringForAPI() in utils/model/model.ts
- */
-function normalizeModelStringForAPI(model: string): string {
-  return model.replace(/\[(1|2)m\]/gi, "");
+  return headers;
 }
 
 export async function callClaudeAPI(
@@ -173,9 +135,10 @@ export async function callClaudeAPI(
   timeouts: TimeoutConfig,
   cloaking: CloakingConfig,
   apiKeyHash?: string,
+  extraHeaders?: Record<string, string>,
 ): Promise<Response> {
   const url = `${BASE_URL}/v1/messages?beta=true`;
-  const rawModel = body.model || "claude-sonnet-4-6";
+  const model = body.model || "claude-sonnet-4-6";
   const timeoutMs = stream
     ? timeouts["stream-messages-ms"]
     : timeouts["messages-ms"];
@@ -183,37 +146,18 @@ export async function callClaudeAPI(
     accessToken,
     stream,
     timeoutMs,
-    rawModel,
+    model,
     cloaking,
     apiKeyHash,
+    extraHeaders,
   );
-
-  // Strip [1m]/[2m] suffix from model before sending to API
-  const requestBody = { ...body, model: normalizeModelStringForAPI(rawModel) };
 
   const response = await fetch(url, {
     method: "POST",
     headers,
-    body: JSON.stringify(requestBody),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
-
-  // Log error details if request failed
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error("=".repeat(80));
-    console.error("CLAUDE API REQUEST FAILED");
-    console.error("=".repeat(80));
-    console.error("Status:", response.status, response.statusText);
-    console.error("URL:", url);
-    console.error("\n--- Request Headers ---");
-    console.error(JSON.stringify(headers, null, 2));
-    console.error("\n--- Request Body ---");
-    console.error(JSON.stringify(requestBody, null, 2));
-    console.error("\n--- Response Body ---");
-    console.error(errorBody);
-    console.error("=".repeat(80));
-  }
 
   return response;
 }
@@ -236,32 +180,12 @@ export async function callClaudeCountTokens(
     apiKeyHash,
   );
 
-  // Strip [1m]/[2m] suffix from model before sending to API
-  const requestBody = { ...body, model: normalizeModelStringForAPI(rawModel) };
-
   const response = await fetch(url, {
     method: "POST",
     headers,
-    body: JSON.stringify(requestBody),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeouts["count-tokens-ms"]),
   });
-
-  // Log error details if request failed
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error("=".repeat(80));
-    console.error("CLAUDE COUNT_TOKENS API REQUEST FAILED");
-    console.error("=".repeat(80));
-    console.error("Status:", response.status, response.statusText);
-    console.error("URL:", url);
-    console.error("\n--- Request Headers ---");
-    console.error(JSON.stringify(headers, null, 2));
-    console.error("\n--- Request Body ---");
-    console.error(JSON.stringify(requestBody, null, 2));
-    console.error("\n--- Response Body ---");
-    console.error(errorBody);
-    console.error("=".repeat(80));
-  }
 
   return response;
 }

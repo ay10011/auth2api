@@ -4,7 +4,10 @@ import { Config, isDebugLevel } from "./config";
 import { AccountManager } from "./accounts/manager";
 import { extractApiKey } from "./api-key";
 import { createChatCompletionsHandler } from "./proxy/handler";
-import { createMessagesHandler, createCountTokensHandler } from "./proxy/passthrough";
+import {
+  createMessagesHandler,
+  createCountTokensHandler,
+} from "./proxy/passthrough";
 import { createResponsesHandler } from "./proxy/responses";
 
 const SUPPORTED_MODELS = [
@@ -47,15 +50,21 @@ function rateLimit(ip: string): boolean {
 }
 
 // Cleanup stale entries every 5 minutes
-const cleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [ip, entry] of rateLimitMap) {
-    if (now > entry.resetAt) rateLimitMap.delete(ip);
-  }
-}, 5 * 60 * 1000);
+const cleanupTimer = setInterval(
+  () => {
+    const now = Date.now();
+    for (const [ip, entry] of rateLimitMap) {
+      if (now > entry.resetAt) rateLimitMap.delete(ip);
+    }
+  },
+  5 * 60 * 1000,
+);
 cleanupTimer.unref();
 
-export function createServer(config: Config, manager: AccountManager): express.Application {
+export function createServer(
+  config: Config,
+  manager: AccountManager,
+): express.Application {
   const app = express();
 
   app.use(express.json({ limit: config["body-limit"] }));
@@ -66,7 +75,7 @@ export function createServer(config: Config, manager: AccountManager): express.A
       console.error(`[debug] ${req.method} ${req.originalUrl} started`);
       res.on("finish", () => {
         console.error(
-          `[debug] ${req.method} ${req.originalUrl} -> ${res.statusCode} in ${Date.now() - startedAt}ms`
+          `[debug] ${req.method} ${req.originalUrl} -> ${res.statusCode} in ${Date.now() - startedAt}ms`,
         );
       });
       next();
@@ -81,7 +90,10 @@ export function createServer(config: Config, manager: AccountManager): express.A
       res.setHeader("Access-Control-Allow-Origin", origin);
     }
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization, x-api-key",
+    );
     if (_req.method === "OPTIONS") {
       res.sendStatus(204);
       return;
@@ -119,11 +131,17 @@ export function createServer(config: Config, manager: AccountManager): express.A
   app.use("/admin", requireApiKey);
 
   // Routes — OpenAI compatible
-  app.post("/v1/chat/completions", createChatCompletionsHandler(config, manager));
+  app.post(
+    "/v1/chat/completions",
+    createChatCompletionsHandler(config, manager),
+  );
   app.post("/v1/responses", createResponsesHandler(config, manager));
 
   // Routes — Claude native passthrough
-  app.post("/v1/messages/count_tokens", createCountTokensHandler(config, manager));
+  app.post(
+    "/v1/messages/count_tokens",
+    createCountTokensHandler(config, manager),
+  );
   app.post("/v1/messages", createMessagesHandler(config, manager));
 
   app.get("/v1/models", (_req, res) => {

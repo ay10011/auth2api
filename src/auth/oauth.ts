@@ -19,7 +19,9 @@ export function generateAuthURL(state: string, pkce: PKCECodes): string {
     state,
   });
   // Append scope with colons unencoded (matching Go's url.Values behavior)
-  const scopeEncoded = SCOPE.split(" ").map((s) => encodeURIComponent(s).replace(/%3A/gi, ":")).join("+");
+  const scopeEncoded = SCOPE.split(" ")
+    .map((s) => encodeURIComponent(s).replace(/%3A/gi, ":"))
+    .join("+");
   return `${AUTH_URL}?${params.toString()}&scope=${scopeEncoded}`;
 }
 
@@ -27,7 +29,7 @@ export async function exchangeCodeForTokens(
   code: string,
   returnedState: string,
   expectedState: string,
-  pkce: PKCECodes
+  pkce: PKCECodes,
 ): Promise<TokenData> {
   if (returnedState !== expectedState) {
     throw new Error("OAuth state mismatch — possible CSRF attack");
@@ -93,7 +95,7 @@ export async function refreshTokens(refreshToken: string): Promise<TokenData> {
 
 export async function refreshTokensWithRetry(
   refreshToken: string,
-  maxRetries = 3
+  maxRetries = 3,
 ): Promise<TokenData> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {

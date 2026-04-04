@@ -8,7 +8,10 @@ import { waitForCallback } from "./auth/callback-server";
 import { createServer } from "./server";
 
 function prompt(question: string): Promise<string> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
   return new Promise((resolve) => {
     rl.question(question, (answer) => {
       rl.close();
@@ -33,8 +36,12 @@ async function doLogin(authDir: string, manual: boolean): Promise<void> {
 
   if (manual) {
     // Manual mode: user pastes the callback URL from browser
-    console.log("\nAfter login, your browser will redirect to a localhost URL that may fail to load.");
-    console.log("Copy the FULL URL from your browser address bar and paste it here.\n");
+    console.log(
+      "\nAfter login, your browser will redirect to a localhost URL that may fail to load.",
+    );
+    console.log(
+      "Copy the FULL URL from your browser address bar and paste it here.\n",
+    );
     const callbackURL = await prompt("Paste callback URL: ");
 
     // Parse code and state from the pasted URL
@@ -59,14 +66,21 @@ async function doLogin(authDir: string, manual: boolean): Promise<void> {
   }
 
   console.log("Exchanging code for tokens...");
-  const tokenData = await exchangeCodeForTokens(code, returnedState, state, pkce);
+  const tokenData = await exchangeCodeForTokens(
+    code,
+    returnedState,
+    state,
+    pkce,
+  );
   manager.addAccount(tokenData);
   console.log(`\nLogin successful! Account: ${tokenData.email}`);
   console.log(`Token expires: ${tokenData.expiresAt}`);
 }
 
 async function startServer(): Promise<void> {
-  const configPath = process.argv.find((a) => a.startsWith("--config="))?.split("=")[1];
+  const configPath = process.argv
+    .find((a) => a.startsWith("--config="))
+    ?.split("=")[1];
   const config = loadConfig(configPath);
   const authDir = resolveAuthDir(config["auth-dir"]);
 

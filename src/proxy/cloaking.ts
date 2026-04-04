@@ -97,6 +97,7 @@ export function applyCloaking(
   accountUuid: string,
   apiKeyHash: string,
   cloaking: CloakingConfig,
+  overrideSessionId?: string,
 ): any {
   const cliVersion = cloaking["cli-version"] || DEFAULT_CLI_VERSION;
   const entrypoint = cloaking.entrypoint || DEFAULT_ENTRYPOINT;
@@ -159,7 +160,7 @@ export function applyCloaking(
   body.metadata.user_id = buildUserId(
     deviceId,
     accountUuid,
-    getSessionId(apiKeyHash),
+    overrideSessionId || getSessionId(apiKeyHash),
   );
 
   return body;

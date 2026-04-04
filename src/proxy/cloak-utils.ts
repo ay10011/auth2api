@@ -13,7 +13,11 @@ const deviceIdCache = new Map<string, string>();
 export function getDeviceId(authDir: string, email: string): string {
   if (deviceIdCache.has(email)) return deviceIdCache.get(email)!;
 
-  const suffix = crypto.createHash("sha256").update(email).digest("hex").slice(0, 12);
+  const suffix = crypto
+    .createHash("sha256")
+    .update(email)
+    .digest("hex")
+    .slice(0, 12);
   const filePath = path.join(authDir, `.device_id_${suffix}`);
   try {
     const stored = fs.readFileSync(filePath, "utf-8").trim();
