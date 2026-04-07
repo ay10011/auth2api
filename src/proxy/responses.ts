@@ -3,7 +3,11 @@ import { Request, Response as ExpressResponse } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { extractApiKey } from "../api-key";
 import { Config, isDebugLevel } from "../config";
-import { AccountFailureKind, AccountManager } from "../accounts/manager";
+import {
+  AccountFailureKind,
+  AccountManager,
+  UsageData,
+} from "../accounts/manager";
 import { applyCloaking } from "./cloaking";
 import { callClaudeAPI } from "./claude-api";
 import { resolveModel } from "./translator";
@@ -288,6 +292,8 @@ interface ResponsesStreamState {
   toolIndex: number;
   inputTokens: number;
   outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
   currentText: string;
   currentToolArgs: string;
 }
@@ -306,6 +312,8 @@ function makeResponsesState(): ResponsesStreamState {
     toolIndex: 0,
     inputTokens: 0,
     outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
     currentText: "",
     currentToolArgs: "",
   };
@@ -325,7 +333,10 @@ function claudeSSEToResponses(
   const nextSeq = () => ++state.seq;
 
   if (event === "message_start") {
-    state.inputTokens = data.message?.usage?.input_tokens || 0;
+    const usage = data.message?.usage;
+    state.inputTokens = usage?.input_tokens || 0;
+    state.cacheCreationInputTokens = usage?.cache_creation_input_tokens || 0;
+    state.cacheReadInputTokens = usage?.cache_read_input_tokens || 0;
     out.push(
       emitEvent("response.created", {
         type: "response.created",
@@ -696,6 +707,12 @@ export function createResponsesHandler(
               }
               if (!clientDisconnected) {
                 manager.recordSuccess(account.token.email);
+                manager.recordUsage(account.token.email, {
+                  inputTokens: state.inputTokens,
+                  outputTokens: state.outputTokens,
+                  cacheCreationInputTokens: state.cacheCreationInputTokens,
+                  cacheReadInputTokens: state.cacheReadInputTokens,
+                });
               }
             } catch (err) {
               if (!clientDisconnected) {
@@ -713,6 +730,14 @@ export function createResponsesHandler(
           } else {
             const claudeResp = await upstreamResp.json();
             manager.recordSuccess(account.token.email);
+            manager.recordUsage(account.token.email, {
+              inputTokens: claudeResp.usage?.input_tokens || 0,
+              outputTokens: claudeResp.usage?.output_tokens || 0,
+              cacheCreationInputTokens:
+                claudeResp.usage?.cache_creation_input_tokens || 0,
+              cacheReadInputTokens:
+                claudeResp.usage?.cache_read_input_tokens || 0,
+            });
             res.json(claudeToResponses(claudeResp, model));
           }
           return;

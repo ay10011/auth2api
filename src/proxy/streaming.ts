@@ -1,9 +1,11 @@
 import { Response as ExpressResponse } from "express";
+import { UsageData } from "../accounts/manager";
 import { claudeStreamEventToOpenai, createStreamState } from "./translator";
 
 export interface StreamResult {
   completed: boolean;
   clientDisconnected: boolean;
+  usage: UsageData;
 }
 
 export async function handleStreamingResponse(
@@ -21,7 +23,16 @@ export async function handleStreamingResponse(
   if (!reader) {
     res.write("data: [DONE]\n\n");
     res.end();
-    return { completed: true, clientDisconnected: false };
+    return {
+      completed: true,
+      clientDisconnected: false,
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+      },
+    };
   }
 
   const decoder = new TextDecoder();
@@ -74,5 +85,14 @@ export async function handleStreamingResponse(
       res.end();
     }
   }
-  return { completed, clientDisconnected };
+  return {
+    completed,
+    clientDisconnected,
+    usage: {
+      inputTokens: state.inputTokens,
+      outputTokens: state.outputTokens,
+      cacheCreationInputTokens: state.cacheCreationInputTokens,
+      cacheReadInputTokens: state.cacheReadInputTokens,
+    },
+  };
 }

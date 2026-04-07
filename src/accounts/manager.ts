@@ -24,6 +24,13 @@ const FAILURE_BACKOFF: Record<
   network: { baseMs: 5 * 1000, maxMs: 5 * 60 * 1000 },
 };
 
+export interface UsageData {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+}
+
 interface AccountState {
   token: TokenData;
   cooldownUntil: number;
@@ -35,6 +42,10 @@ interface AccountState {
   totalRequests: number;
   totalSuccesses: number;
   totalFailures: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheCreationInputTokens: number;
+  totalCacheReadInputTokens: number;
   refreshing: boolean;
   refreshPromise: Promise<boolean> | null;
 }
@@ -51,6 +62,10 @@ export interface AccountSnapshot {
   totalRequests: number;
   totalSuccesses: number;
   totalFailures: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheCreationInputTokens: number;
+  totalCacheReadInputTokens: number;
   expiresAt: string;
   refreshing: boolean;
 }
@@ -78,6 +93,7 @@ export class AccountManager {
   private stickyUntil: number = 0; // timestamp until which current account is sticky
   private authDir: string;
   private refreshTimer: NodeJS.Timeout | null = null;
+  private statsTimer: NodeJS.Timeout | null = null;
   private refreshing = false;
 
   constructor(authDir: string) {
@@ -182,6 +198,15 @@ export class AccountManager {
     acct.totalSuccesses++;
   }
 
+  recordUsage(email: string, usage: UsageData): void {
+    const acct = this.accounts.get(email);
+    if (!acct) return;
+    acct.totalInputTokens += usage.inputTokens;
+    acct.totalOutputTokens += usage.outputTokens;
+    acct.totalCacheCreationInputTokens += usage.cacheCreationInputTokens;
+    acct.totalCacheReadInputTokens += usage.cacheReadInputTokens;
+  }
+
   recordFailure(
     email: string,
     kind: AccountFailureKind,
@@ -233,6 +258,10 @@ export class AccountManager {
         totalRequests: acct.totalRequests,
         totalSuccesses: acct.totalSuccesses,
         totalFailures: acct.totalFailures,
+        totalInputTokens: acct.totalInputTokens,
+        totalOutputTokens: acct.totalOutputTokens,
+        totalCacheCreationInputTokens: acct.totalCacheCreationInputTokens,
+        totalCacheReadInputTokens: acct.totalCacheReadInputTokens,
         expiresAt: acct.token.expiresAt,
         refreshing: acct.refreshing,
       });
@@ -260,6 +289,40 @@ export class AccountManager {
       clearInterval(this.refreshTimer);
       this.refreshTimer = null;
     }
+  }
+
+  startStatsLogger(): void {
+    const timer = setInterval(() => this.logStats(), 5 * 60 * 1000);
+    timer.unref();
+    this.statsTimer = timer;
+  }
+
+  stopStatsLogger(): void {
+    if (this.statsTimer) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = null;
+    }
+  }
+
+  private logStats(): void {
+    if (this.accounts.size === 0) return;
+    console.log(`\n===== Account Stats (${new Date().toISOString()}) =====`);
+    for (const acct of this.accounts.values()) {
+      const available = acct.cooldownUntil <= Date.now();
+      console.log(
+        `  ${acct.token.email}: ` +
+          `available=${available}, ` +
+          `requests=${acct.totalRequests}, ` +
+          `successes=${acct.totalSuccesses}, ` +
+          `failures=${acct.totalFailures}, ` +
+          `input_tokens=${acct.totalInputTokens}, ` +
+          `output_tokens=${acct.totalOutputTokens}, ` +
+          `cache_creation=${acct.totalCacheCreationInputTokens}, ` +
+          `cache_read=${acct.totalCacheReadInputTokens}, ` +
+          `total_tokens=${acct.totalInputTokens + acct.totalOutputTokens + acct.totalCacheCreationInputTokens + acct.totalCacheReadInputTokens}`,
+      );
+    }
+    console.log(`====================================================\n`);
   }
 
   get accountCount(): number {
@@ -324,6 +387,10 @@ export class AccountManager {
       totalRequests: 0,
       totalSuccesses: 0,
       totalFailures: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCacheCreationInputTokens: 0,
+      totalCacheReadInputTokens: 0,
       refreshing: false,
       refreshPromise: null,
     };

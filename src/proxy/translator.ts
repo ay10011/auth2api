@@ -263,6 +263,10 @@ export interface StreamState {
   model: string;
   toolCalls: Map<number, { id: string; name: string; args: string }>;
   nextToolIndex: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
 }
 
 export function createStreamState(model: string): StreamState {
@@ -271,6 +275,10 @@ export function createStreamState(model: string): StreamState {
     model,
     toolCalls: new Map(),
     nextToolIndex: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
   };
 }
 
@@ -301,6 +309,10 @@ export function claudeStreamEventToOpenai(
   const chunks: string[] = [];
 
   if (event === "message_start") {
+    const usage = data.message?.usage;
+    state.inputTokens = usage?.input_tokens || 0;
+    state.cacheCreationInputTokens = usage?.cache_creation_input_tokens || 0;
+    state.cacheReadInputTokens = usage?.cache_read_input_tokens || 0;
     chunks.push(makeChunk(state, { role: "assistant", content: "" }, null));
     return chunks;
   }
@@ -382,6 +394,7 @@ export function claudeStreamEventToOpenai(
   }
 
   if (event === "message_delta") {
+    state.outputTokens = data.usage?.output_tokens || 0;
     const finishReason = mapStopReason(data.delta?.stop_reason || "end_turn");
     const usage = data.usage
       ? {

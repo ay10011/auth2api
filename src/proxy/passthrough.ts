@@ -2,7 +2,11 @@ import crypto from "crypto";
 import { Request, Response as ExpressResponse } from "express";
 import { extractApiKey } from "../api-key";
 import { Config, isDebugLevel } from "../config";
-import { AccountFailureKind, AccountManager } from "../accounts/manager";
+import {
+  AccountFailureKind,
+  AccountManager,
+  UsageData,
+} from "../accounts/manager";
 import { applyCloaking } from "./cloaking";
 import { callClaudeAPI, callClaudeCountTokens } from "./claude-api";
 
@@ -142,6 +146,14 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
             }
 
             let clientDisconnected = false;
+            const usage: UsageData = {
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheCreationInputTokens: 0,
+              cacheReadInputTokens: 0,
+            };
+            let sseBuffer = "";
+            let currentEvent = "";
             res.on("close", () => {
               clientDisconnected = true;
               reader.cancel().catch(() => {});
@@ -151,10 +163,40 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
               while (!clientDisconnected) {
                 const { done, value } = await reader.read();
                 if (done) break;
-                res.write(Buffer.from(value));
+                const chunk = Buffer.from(value);
+                res.write(chunk);
+
+                // Parse SSE to extract usage
+                sseBuffer += chunk.toString();
+                const lines = sseBuffer.split("\n");
+                sseBuffer = lines.pop() ?? "";
+                for (const line of lines) {
+                  if (line.startsWith("event:")) {
+                    currentEvent = line.slice(6).trim();
+                  } else if (line.startsWith("data:")) {
+                    const raw = line.slice(5).trim();
+                    if (!raw || raw === "[DONE]") continue;
+                    try {
+                      const data = JSON.parse(raw);
+                      if (currentEvent === "message_start") {
+                        const u = data.message?.usage;
+                        usage.inputTokens = u?.input_tokens || 0;
+                        usage.cacheCreationInputTokens =
+                          u?.cache_creation_input_tokens || 0;
+                        usage.cacheReadInputTokens =
+                          u?.cache_read_input_tokens || 0;
+                      } else if (currentEvent === "message_delta") {
+                        usage.outputTokens = data.usage?.output_tokens || 0;
+                      }
+                    } catch {
+                      /* ignore parse errors */
+                    }
+                  }
+                }
               }
               if (!clientDisconnected) {
                 manager.recordSuccess(account.token.email);
+                manager.recordUsage(account.token.email, usage);
               }
             } catch (err) {
               if (!clientDisconnected) {
@@ -172,6 +214,13 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
             // Forward JSON response directly
             const data = await upstreamResp.json();
             manager.recordSuccess(account.token.email);
+            manager.recordUsage(account.token.email, {
+              inputTokens: data.usage?.input_tokens || 0,
+              outputTokens: data.usage?.output_tokens || 0,
+              cacheCreationInputTokens:
+                data.usage?.cache_creation_input_tokens || 0,
+              cacheReadInputTokens: data.usage?.cache_read_input_tokens || 0,
+            });
             res.json(data);
           }
           return;

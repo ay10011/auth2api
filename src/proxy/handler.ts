@@ -2,7 +2,11 @@ import crypto from "crypto";
 import { Request, Response as ExpressResponse } from "express";
 import { extractApiKey } from "../api-key";
 import { Config, isDebugLevel } from "../config";
-import { AccountFailureKind, AccountManager } from "../accounts/manager";
+import {
+  AccountFailureKind,
+  AccountManager,
+  UsageData,
+} from "../accounts/manager";
 import { openaiToClaude, claudeToOpenai, resolveModel } from "./translator";
 import { applyCloaking } from "./cloaking";
 import { callClaudeAPI } from "./claude-api";
@@ -10,6 +14,15 @@ import { handleStreamingResponse } from "./streaming";
 
 const MAX_RETRIES = 3;
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+
+function extractUsage(resp: any): UsageData {
+  return {
+    inputTokens: resp.usage?.input_tokens || 0,
+    outputTokens: resp.usage?.output_tokens || 0,
+    cacheCreationInputTokens: resp.usage?.cache_creation_input_tokens || 0,
+    cacheReadInputTokens: resp.usage?.cache_read_input_tokens || 0,
+  };
+}
 
 function classifyFailure(status: number): AccountFailureKind {
   if (status === 429) return "rate_limit";
@@ -126,6 +139,7 @@ export function createChatCompletionsHandler(
             );
             if (streamResult.completed) {
               manager.recordSuccess(account.token.email);
+              manager.recordUsage(account.token.email, streamResult.usage);
             } else if (!streamResult.clientDisconnected) {
               manager.recordFailure(
                 account.token.email,
@@ -137,6 +151,7 @@ export function createChatCompletionsHandler(
             const claudeResp = await upstreamResp.json();
             const openaiResp = claudeToOpenai(claudeResp, model);
             manager.recordSuccess(account.token.email);
+            manager.recordUsage(account.token.email, extractUsage(claudeResp));
             res.json(openaiResp);
           }
           return;

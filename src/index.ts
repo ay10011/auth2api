@@ -93,6 +93,7 @@ async function startServer(): Promise<void> {
   }
 
   manager.startAutoRefresh();
+  manager.startStatsLogger();
 
   const app = createServer(config, manager);
   const host = config.host || "127.0.0.1";
@@ -108,6 +109,7 @@ async function startServer(): Promise<void> {
 
   process.on("SIGINT", () => {
     manager.stopAutoRefresh();
+    manager.stopStatsLogger();
     process.exit(0);
   });
 }
