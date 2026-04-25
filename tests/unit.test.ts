@@ -139,7 +139,7 @@ test("loadConfig normalizes debug mode", () => {
 // ══════════════════════════════════════════════════
 
 test("resolveModel maps aliases", () => {
-  assert.equal(resolveModel("opus"), "claude-opus-4-6");
+  assert.equal(resolveModel("opus"), "claude-opus-4-7");
   assert.equal(resolveModel("sonnet"), "claude-sonnet-4-6");
   assert.equal(resolveModel("haiku"), "claude-haiku-4-5-20251001");
 });
@@ -147,6 +147,8 @@ test("resolveModel maps aliases", () => {
 test("resolveModel passes through unknown models", () => {
   assert.equal(resolveModel("gpt-4o"), "gpt-4o");
   assert.equal(resolveModel("claude-sonnet-4-6"), "claude-sonnet-4-6");
+  assert.equal(resolveModel("claude-opus-4-7"), "claude-opus-4-7");
+  assert.equal(resolveModel("claude-opus-4-6"), "claude-opus-4-6");
 });
 
 // ══════════════════════════════════════════════════

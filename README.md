@@ -126,6 +126,7 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 | Model ID | Description |
 |----------|-------------|
+| `claude-opus-4-7` | Claude Opus 4.7 |
 | `claude-opus-4-6` | Claude Opus 4.6 |
 | `claude-sonnet-4-6` | Claude Sonnet 4.6 |
 | `claude-haiku-4-5-20251001` | Claude Haiku 4.5 |
@@ -133,7 +134,7 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 Short convenience aliases accepted by auth2api:
 
-- `opus` -> `claude-opus-4-6`
+- `opus` -> `claude-opus-4-7`
 - `sonnet` -> `claude-sonnet-4-6`
 - `haiku` -> `claude-haiku-4-5-20251001`
 

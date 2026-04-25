@@ -126,6 +126,7 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 | 模型 ID | 说明 |
 |--------|------|
+| `claude-opus-4-7` | Claude Opus 4.7 |
 | `claude-opus-4-6` | Claude Opus 4.6 |
 | `claude-sonnet-4-6` | Claude Sonnet 4.6 |
 | `claude-haiku-4-5-20251001` | Claude Haiku 4.5 |
@@ -133,7 +134,7 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 auth2api 额外支持以下便捷别名：
 
-- `opus` -> `claude-opus-4-6`
+- `opus` -> `claude-opus-4-7`
 - `sonnet` -> `claude-sonnet-4-6`
 - `haiku` -> `claude-haiku-4-5-20251001`
 
