@@ -1,5 +1,9 @@
 import { PKCECodes, TokenData } from "./types";
 import { timeout } from "../utils/common";
+import {
+  RefreshTokenExhaustedError,
+  detectExhaustedReason,
+} from "./refresh-errors";
 
 const AUTH_URL = "https://claude.ai/oauth/authorize";
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
@@ -79,6 +83,10 @@ export async function refreshTokens(refreshToken: string): Promise<TokenData> {
 
   if (!resp.ok) {
     const text = await resp.text();
+    const reason = detectExhaustedReason(text);
+    if (reason) {
+      throw new RefreshTokenExhaustedError(reason, resp.status, text);
+    }
     throw new Error(`Token refresh failed (${resp.status}): ${text}`);
   }
 
@@ -102,6 +110,8 @@ export async function refreshTokensWithRetry(
     try {
       return await refreshTokens(refreshToken);
     } catch (err) {
+      // Refresh token revoked/expired/reused — do not retry.
+      if (err instanceof RefreshTokenExhaustedError) throw err;
       if (attempt >= maxRetries) throw err;
       await timeout(attempt * 1000);
     }

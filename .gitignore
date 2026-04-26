@@ -3,3 +3,13 @@ dist/
 config.yaml
 *.log
 .env
+
+# Editor / IDE local state
+.cursor/
+.idea/
+.vscode/
+*.tsbuildinfo
+
+# OS metadata
+.DS_Store
+Thumbs.db

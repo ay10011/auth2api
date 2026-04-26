@@ -50,7 +50,10 @@ test("extractApiKey returns empty string when no key", () => {
 });
 
 test("extractApiKey handles x-api-key as array", () => {
-  assert.equal(extractApiKey({ "x-api-key": ["sk-first", "sk-second"] }), "sk-first");
+  assert.equal(
+    extractApiKey({ "x-api-key": ["sk-first", "sk-second"] }),
+    "sk-first",
+  );
 });
 
 test("hashApiKey returns consistent sha256 hex", () => {
@@ -122,10 +125,7 @@ test("loadConfig normalizes debug mode", () => {
     os.tmpdir(),
     `auth2api-debug-test-${Date.now()}.yaml`,
   );
-  fs.writeFileSync(
-    configPath,
-    'api-keys:\n  - "sk-test"\ndebug: true\n',
-  );
+  fs.writeFileSync(configPath, 'api-keys:\n  - "sk-test"\ndebug: true\n');
   try {
     const config = loadConfig(configPath);
     assert.equal(config.debug, "errors"); // true → "errors"
@@ -214,9 +214,7 @@ test("openaiToAnthropic translates system messages", () => {
       { role: "user", content: "hi" },
     ],
   });
-  assert.deepEqual(result.system, [
-    { type: "text", text: "You are helpful." },
-  ]);
+  assert.deepEqual(result.system, [{ type: "text", text: "You are helpful." }]);
   assert.equal(result.messages.length, 1);
 });
 
@@ -486,7 +484,10 @@ test("anthropicSSEToChat handles tool_use streaming", () => {
   // tool block start
   const startChunks = anthropicSSEToChat(
     "content_block_start",
-    { content_block: { type: "tool_use", id: "call_1", name: "get_weather" }, index: 1 },
+    {
+      content_block: { type: "tool_use", id: "call_1", name: "get_weather" },
+      index: 1,
+    },
     state,
   );
   assert.equal(startChunks.length, 1);
@@ -651,9 +652,7 @@ test("anthropicSSEToResponses handles text streaming", () => {
     usage,
   );
   assert.ok(startEvents.some((e) => e.includes("response.output_item.added")));
-  assert.ok(
-    startEvents.some((e) => e.includes("response.content_part.added")),
-  );
+  assert.ok(startEvents.some((e) => e.includes("response.content_part.added")));
 
   // text delta
   const deltaEvents = anthropicSSEToResponses(
@@ -663,9 +662,7 @@ test("anthropicSSEToResponses handles text streaming", () => {
     "sonnet",
     usage,
   );
-  assert.ok(
-    deltaEvents.some((e) => e.includes("response.output_text.delta")),
-  );
+  assert.ok(deltaEvents.some((e) => e.includes("response.output_text.delta")));
   assert.ok(deltaEvents.some((e) => e.includes('"Hello"')));
 
   // text block stop
@@ -677,9 +674,7 @@ test("anthropicSSEToResponses handles text streaming", () => {
     usage,
   );
   assert.ok(stopEvents.some((e) => e.includes("response.output_text.done")));
-  assert.ok(
-    stopEvents.some((e) => e.includes("response.output_item.done")),
-  );
+  assert.ok(stopEvents.some((e) => e.includes("response.output_item.done")));
 });
 
 test("anthropicSSEToResponses handles message_stop with usage", () => {

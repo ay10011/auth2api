@@ -18,13 +18,29 @@ export interface StreamResult {
 }
 
 function extractUsageFromSSE(event: string, data: any, usage: UsageData): void {
-  if (event !== "message_delta") return;
-  const u = data.usage;
-  if (!u) return;
-  usage.inputTokens = u.input_tokens || 0;
-  usage.outputTokens = u.output_tokens || 0;
-  usage.cacheCreationInputTokens = u.cache_creation_input_tokens || 0;
-  usage.cacheReadInputTokens = u.cache_read_input_tokens || 0;
+  // Anthropic Messages stream — usage arrives on message_delta.
+  if (event === "message_delta") {
+    const u = data?.usage;
+    if (!u) return;
+    usage.inputTokens = u.input_tokens || 0;
+    usage.outputTokens = u.output_tokens || 0;
+    usage.cacheCreationInputTokens = u.cache_creation_input_tokens || 0;
+    usage.cacheReadInputTokens = u.cache_read_input_tokens || 0;
+    return;
+  }
+  // OpenAI Responses stream — usage arrives on response.completed under
+  // response.usage (matches codex-rs/codex-api/src/sse/responses.rs).
+  if (event === "response.completed") {
+    const u = data?.response?.usage;
+    if (!u) return;
+    usage.inputTokens = u.input_tokens || 0;
+    usage.outputTokens = u.output_tokens || 0;
+    usage.cacheReadInputTokens = u.input_tokens_details?.cached_tokens || 0;
+    usage.reasoningOutputTokens =
+      u.output_tokens_details?.reasoning_tokens || 0;
+    // Codex has no cache_creation analog; leave at default.
+    return;
+  }
 }
 
 export async function handleStreamingResponse(
@@ -37,6 +53,7 @@ export async function handleStreamingResponse(
     outputTokens: 0,
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: 0,
+    reasoningOutputTokens: 0,
   };
 
   resp.setHeader("Content-Type", "text/event-stream");

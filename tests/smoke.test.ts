@@ -12,6 +12,8 @@ import { Config, loadConfig } from "../src/config";
 import { createServer } from "../src/server";
 import { saveToken } from "../src/auth/token-storage";
 import { TokenData } from "../src/auth/types";
+import { buildRegistry, ProviderRegistry } from "../src/providers/registry";
+import { refreshTokensWithRetry } from "../src/auth/oauth";
 
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
 
@@ -42,6 +44,7 @@ function makeToken(overrides: Partial<TokenData> = {}): TokenData {
     email: "test@example.com",
     expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     accountUuid: "test-uuid",
+    provider: "anthropic",
     ...overrides,
   };
 }
@@ -50,16 +53,33 @@ function makeManager(authDir: string, tokens: TokenData[]): AccountManager {
   for (const token of tokens) {
     saveToken(authDir, token);
   }
-  const manager = new AccountManager(authDir);
+  const manager = new AccountManager(authDir, {
+    provider: "anthropic",
+    refresh: refreshTokensWithRetry,
+  });
   manager.load();
   return manager;
+}
+
+function makeRegistry(
+  authDir: string,
+  manager: AccountManager,
+): ProviderRegistry {
+  // Build the real registry, then swap the anthropic manager for the test one
+  // so the existing tests can introspect/control it.
+  const registry = buildRegistry(authDir);
+  const anthropic = registry.get("anthropic");
+  // Replace the manager with the pre-populated test instance.
+  (anthropic as { manager: AccountManager }).manager = manager;
+  return registry;
 }
 
 async function startApp(
   config: Config,
   manager: AccountManager,
 ): Promise<http.Server> {
-  const app = createServer(config, manager);
+  const registry = makeRegistry(config["auth-dir"], manager);
+  const app = createServer(config, registry);
   const server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return server;
@@ -173,8 +193,12 @@ test("accepts x-api-key auth and serves models/admin state", async (t) => {
   });
 
   assert.equal(adminResp.status, 200);
-  assert.equal(adminResp.body.account_count, 1);
-  assert.equal(adminResp.body.accounts[0].email, "test@example.com");
+  assert.equal(adminResp.body.providers.anthropic.account_count, 1);
+  assert.equal(
+    adminResp.body.providers.anthropic.accounts[0].email,
+    "test@example.com",
+  );
+  assert.equal(adminResp.body.providers.codex.account_count, 0);
 });
 
 test("proxies a non-stream chat completion through Claude OAuth token", async (t) => {
@@ -302,8 +326,67 @@ test("refreshes the OAuth token after an upstream 401 and retries successfully",
   });
 
   assert.equal(adminResp.status, 200);
-  assert.equal(adminResp.body.accounts[0].lastRefreshAt !== null, true);
-  assert.equal(adminResp.body.accounts[0].totalSuccesses, 1);
+  const anthAccounts = adminResp.body.providers.anthropic.accounts;
+  assert.equal(anthAccounts[0].lastRefreshAt !== null, true);
+  assert.equal(anthAccounts[0].totalSuccesses, 1);
+});
+
+test("does not double-refresh when the second request also 401s (refresh-token-rotation safety)", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const calls: string[] = [];
+  let refreshCalls = 0;
+  const restoreFetch = withMockedFetch(async (input) => {
+    const url = String(input);
+    calls.push(url);
+    // Upstream is broken — every call returns 401 regardless of token.
+    if (url === "https://api.anthropic.com/v1/messages?beta=true") {
+      return new Response("unauthorized", { status: 401 });
+    }
+    if (url === TOKEN_URL) {
+      refreshCalls++;
+      return new Response(
+        JSON.stringify({
+          access_token: `refreshed-${refreshCalls}`,
+          refresh_token: `rotated-${refreshCalls}`,
+          expires_in: 3600,
+          account: { email_address: "test@example.com" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    throw new Error(`Unexpected fetch to ${url}`);
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "fail me" }],
+      stream: false,
+    },
+  });
+
+  // Final response should be the upstream 401 we couldn't recover from.
+  assert.equal(resp.status, 401);
+  // Critical: refresh is called exactly ONCE, not on every 401. Otherwise we
+  // would burn rotated refresh tokens and could trigger a refresh_token_reused
+  // failure on the next legitimate refresh.
+  assert.equal(
+    refreshCalls,
+    1,
+    `expected one refresh, saw ${refreshCalls}; calls: ${JSON.stringify(calls)}`,
+  );
 });
 
 test("returns rate limited when the configured account is cooled down", async (t) => {
@@ -490,7 +573,10 @@ test("loads multiple accounts successfully", (t) => {
     makeToken({ email: "second@example.com", accessToken: "second-access" }),
   );
 
-  const manager = new AccountManager(authDir);
+  const manager = new AccountManager(authDir, {
+    provider: "anthropic",
+    refresh: refreshTokensWithRetry,
+  });
   manager.load();
   assert.equal(manager.accountCount, 2);
 });
@@ -612,8 +698,10 @@ test("multi-account admin endpoint shows all accounts", async (t) => {
   });
 
   assert.equal(resp.status, 200);
-  assert.equal(resp.body.account_count, 2);
-  const emails = resp.body.accounts.map((a: any) => a.email).sort();
+  assert.equal(resp.body.providers.anthropic.account_count, 2);
+  const emails = resp.body.providers.anthropic.accounts
+    .map((a: any) => a.email)
+    .sort();
   assert.deepEqual(emails, ["a@example.com", "b@example.com"]);
 });
 
@@ -774,4 +862,117 @@ test("loadConfig converts YAML api-keys array to Set", () => {
   } finally {
     fs.unlinkSync(configPath);
   }
+});
+
+test("POST /admin/reload reloads token from disk; subsequent request uses new bearer", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  // Existing in-memory token = "old-access". Disk will be rewritten to "new-access" mid-test.
+  const manager = makeManager(authDir, [makeToken({ accessToken: "old-access" })]);
+
+  const calls: { url: string; auth: string }[] = [];
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    const url = String(input);
+    const auth =
+      ((init?.headers as Record<string, string> | undefined)?.Authorization) ||
+      "";
+    calls.push({ url, auth });
+    if (url.startsWith("https://api.anthropic.com/v1/messages")) {
+      // Backend only accepts the new token.
+      if (auth === "Bearer new-access") {
+        return new Response(
+          JSON.stringify({
+            id: "msg_ok",
+            content: [{ type: "text", text: "hello after reload" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("unauthorized", { status: 401 });
+    }
+    if (url === TOKEN_URL) {
+      // If the manager tries to refresh while we're racing, return a fresh
+      // unrelated token so the test isolates the reload path.
+      return new Response(
+        JSON.stringify({
+          access_token: "refresh-noise",
+          refresh_token: "rt",
+          expires_in: 3600,
+          account: { email_address: "test@example.com" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    throw new Error(`Unexpected fetch to ${url}`);
+  });
+
+  const server = await startApp(makeConfig(authDir), manager);
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  // Simulate `--login` writing a new token to disk while server is up.
+  saveToken(authDir, makeToken({ accessToken: "new-access" }));
+
+  // Trigger reload via the new endpoint.
+  const reloadResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/admin/reload",
+    headers: { Authorization: "Bearer test-key" },
+  });
+  assert.equal(reloadResp.status, 200);
+  assert.deepEqual(reloadResp.body.reloaded.anthropic.updated, [
+    "test@example.com",
+  ]);
+  assert.deepEqual(reloadResp.body.reloaded.anthropic.added, []);
+
+  // Subsequent request should use the new bearer.
+  const chatResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hi" }],
+      stream: false,
+    },
+  });
+  assert.equal(chatResp.status, 200);
+  assert.equal(
+    chatResp.body.choices[0].message.content,
+    "hello after reload",
+  );
+  // Final upstream call must have used the new bearer (no refresh-and-retry).
+  const upstream = calls.filter((c) =>
+    c.url.startsWith("https://api.anthropic.com/v1/messages"),
+  );
+  assert.equal(upstream.at(-1)?.auth, "Bearer new-access");
+});
+
+test("POST /admin/reload requires the API key", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(makeConfig(authDir), manager);
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+  const noAuth = await requestJson({
+    server,
+    method: "POST",
+    path: "/admin/reload",
+  });
+  assert.equal(noAuth.status, 401);
+  const wrongAuth = await requestJson({
+    server,
+    method: "POST",
+    path: "/admin/reload",
+    headers: { Authorization: "Bearer wrong" },
+  });
+  assert.equal(wrongAuth.status, 403);
 });

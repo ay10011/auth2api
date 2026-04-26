@@ -33,3 +33,17 @@ cloaking:
   # Entrypoint for billing attribution (default: cli)
   # Claude Code uses: cli, mcp, sdk, etc.
   entrypoint: "cli"
+
+  # Codex (ChatGPT) provider — protocol-required header strings.
+  # NOT identity faking; these mirror what the official codex CLI sends.
+  # The cli-version drives BOTH the User-Agent suffix and the explicit
+  # `version` HTTP header — the backend version-gates some models on it
+  # ("requires a newer version of Codex" 400). Bump if you see that error;
+  # `npm view @openai/codex version` shows the current released version.
+  codex:
+    # Full User-Agent string, takes precedence over the components below.
+    # user-agent: "codex_cli_rs/0.125.0 (macos; arm64)"
+    originator: "codex_cli_rs"
+    cli-version: "0.125.0"
+    # Set only if the upstream begins requiring an OpenAI-Beta header.
+    # openai-beta: "responses=experimental"

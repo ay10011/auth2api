@@ -12,15 +12,24 @@ const SUCCESS_HTML = `<!DOCTYPE html>
 <p>You can close this tab and return to the terminal.</p>
 </body></html>`;
 
+export interface CallbackOptions {
+  port?: number;
+  timeoutMs?: number;
+  callbackPath?: string;
+}
+
 export function waitForCallback(
-  port = 54545,
-  timeoutMs = 300000,
+  opts: CallbackOptions = {},
 ): Promise<CallbackResult> {
+  const port = opts.port ?? 54545;
+  const timeoutMs = opts.timeoutMs ?? 300000;
+  const callbackPath = opts.callbackPath ?? "/callback";
+
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       const url = new URL(req.url || "/", `http://localhost:${port}`);
 
-      if (url.pathname === "/callback") {
+      if (url.pathname === callbackPath) {
         const error = url.searchParams.get("error");
         if (error) {
           res.writeHead(400, { "Content-Type": "text/plain" });
@@ -39,13 +48,14 @@ export function waitForCallback(
           return; // don't consume the one-shot flow
         }
 
-        res.writeHead(302, { Location: "/success" });
-        res.end();
-        cleanup();
-        resolve({ code, state });
-      } else if (url.pathname === "/success") {
+        // Serve the success page inline. We deliberately don't 302 to a
+        // /…/success path because cleanup() closes the server immediately
+        // after this request, so the browser would get a connection-refused
+        // page when following the redirect.
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(SUCCESS_HTML);
+        cleanup();
+        resolve({ code, state });
       } else {
         res.writeHead(404);
         res.end();
@@ -64,7 +74,7 @@ export function waitForCallback(
 
     server.listen(port, "127.0.0.1", () => {
       console.log(
-        `OAuth callback server listening on http://127.0.0.1:${port}`,
+        `OAuth callback server listening on http://127.0.0.1:${port}${callbackPath}`,
       );
     });
   });

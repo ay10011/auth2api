@@ -1,16 +1,16 @@
 import { Request, Response as ExpressResponse } from "express";
 import { Config, isDebugLevel } from "../config";
-import { AccountManager, extractUsage } from "../accounts/manager";
+import { extractUsage } from "../accounts/manager";
+import { ProviderRegistry } from "../providers/registry";
 import { proxyWithRetry } from "../utils/http";
-import { applyCloaking } from "../upstream/cloaking";
-import {
-  callAnthropicMessages,
-  callAnthropicCountTokens,
-} from "../upstream/anthropic-api";
+import { resolveModel } from "../upstream/translator";
 import { handleStreamingResponse } from "../upstream/streaming";
 
 // POST /v1/messages — Anthropic native format passthrough
-export function createMessagesHandler(config: Config, manager: AccountManager) {
+export function createMessagesHandler(
+  config: Config,
+  registry: ProviderRegistry,
+) {
   return async (req: Request, resp: ExpressResponse): Promise<void> => {
     try {
       const body = req.body;
@@ -32,17 +32,36 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
         console.log(JSON.stringify(body, null, 2));
       }
 
+      const model = resolveModel(body.model || "claude-sonnet-4-6");
+      const provider = registry.forModel(model);
+
+      // Codex path: /v1/messages × codex needs an Anthropic-Messages →
+      // OpenAI-Responses translator pair, deferred to a follow-up PR.
+      if (provider.nativeFormat === "openai-responses") {
+        resp.status(400).json({
+          error: {
+            message:
+              "This model is served by the codex provider, which does not support /v1/messages. Use /v1/responses instead.",
+            type: "unsupported_endpoint_for_provider",
+            provider: provider.id,
+          },
+        });
+        return;
+      }
+
       const stream = !!body.stream;
 
-      await proxyWithRetry("Messages", resp, config, manager, {
+      await proxyWithRetry("Messages", resp, config, {
+        manager: provider.manager,
         upstream: (account) => {
-          const anthropicBody = applyCloaking({
-            request: req,
-            account,
-            config,
-          });
-          return callAnthropicMessages({
-            body: anthropicBody,
+          const cloaked =
+            provider.applyCloaking?.({
+              request: req,
+              account,
+              config,
+            }) ?? body;
+          return provider.callMessages({
+            body: cloaked,
             request: req,
             account,
             config,
@@ -52,9 +71,9 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
           if (stream) {
             const result = await handleStreamingResponse(upstream, resp);
             if (result.completed) {
-              manager.recordSuccess(account.token.email, result.usage);
+              provider.manager.recordSuccess(account.token.email, result.usage);
             } else if (!result.clientDisconnected) {
-              manager.recordFailure(
+              provider.manager.recordFailure(
                 account.token.email,
                 "network",
                 "stream terminated before completion",
@@ -62,7 +81,7 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
             }
           } else {
             const anthropicResp = await upstream.json();
-            manager.recordSuccess(
+            provider.manager.recordSuccess(
               account.token.email,
               extractUsage(anthropicResp),
             );
@@ -80,15 +99,32 @@ export function createMessagesHandler(config: Config, manager: AccountManager) {
 // POST /v1/messages/count_tokens — passthrough
 export function createCountTokensHandler(
   config: Config,
-  manager: AccountManager,
+  registry: ProviderRegistry,
 ) {
   return async (req: Request, resp: ExpressResponse): Promise<void> => {
     try {
-      await proxyWithRetry("CountTokens", resp, config, manager, {
+      const body = req.body;
+      const model = resolveModel(body?.model || "claude-sonnet-4-6");
+      const provider = registry.forModel(model);
+
+      if (!provider.callCountTokens) {
+        resp.status(501).json({
+          error: {
+            message: `count_tokens is not supported for the ${provider.id} provider.`,
+            type: "unsupported_endpoint_for_provider",
+            provider: provider.id,
+          },
+        });
+        return;
+      }
+
+      const callCountTokens = provider.callCountTokens.bind(provider);
+      await proxyWithRetry("CountTokens", resp, config, {
+        manager: provider.manager,
         upstream: (account) =>
-          callAnthropicCountTokens({ request: req, account, config }),
+          callCountTokens({ request: req, account, config }),
         success: async (upstream, account) => {
-          manager.recordSuccess(account.token.email);
+          provider.manager.recordSuccess(account.token.email);
           const data = await upstream.json();
           resp.json(data);
         },
