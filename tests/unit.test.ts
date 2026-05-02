@@ -3,9 +3,12 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { EventEmitter } from "node:events";
 
 import { extractApiKey, hashApiKey, timeout } from "../src/utils/common";
-import { classifyFailure } from "../src/utils/http";
+import { combineAbortSignals } from "../src/utils/abort";
+import { classifyFailure, proxyWithRetry } from "../src/utils/http";
+import { handleStreamingResponse } from "../src/upstream/streaming";
 import {
   resolveModel,
   openaiToAnthropic,
@@ -50,7 +53,10 @@ test("extractApiKey returns empty string when no key", () => {
 });
 
 test("extractApiKey handles x-api-key as array", () => {
-  assert.equal(extractApiKey({ "x-api-key": ["sk-first", "sk-second"] }), "sk-first");
+  assert.equal(
+    extractApiKey({ "x-api-key": ["sk-first", "sk-second"] }),
+    "sk-first",
+  );
 });
 
 test("hashApiKey returns consistent sha256 hex", () => {
@@ -71,6 +77,18 @@ test("timeout resolves after delay", async () => {
   assert.ok(Date.now() - start >= 45);
 });
 
+test("combineAbortSignals aborts when any input signal aborts", async () => {
+  const first = new AbortController();
+  const second = new AbortController();
+  const combined = combineAbortSignals([first.signal, second.signal]);
+
+  assert.equal(combined.aborted, false);
+  second.abort(new Error("client disconnected"));
+
+  assert.equal(combined.aborted, true);
+  assert.match(String(combined.reason), /client disconnected/);
+});
+
 // ══════════════════════════════════════════════════
 // utils/http.ts
 // ══════════════════════════════════════════════════
@@ -83,6 +101,237 @@ test("classifyFailure maps status codes correctly", () => {
   assert.equal(classifyFailure(502), "server");
   assert.equal(classifyFailure(503), "server");
   assert.equal(classifyFailure(418), "server");
+});
+
+function makeMockResponse(): any {
+  const resp = new EventEmitter() as any;
+  resp.headers = {};
+  resp.chunks = [];
+  resp.headersSent = false;
+  resp.destroyed = false;
+  resp.setHeader = (key: string, value: string) => {
+    resp.headers[key.toLowerCase()] = value;
+    return resp;
+  };
+  resp.status = (code: number) => {
+    resp.statusCode = code;
+    return resp;
+  };
+  resp.json = (body: any) => {
+    resp.body = body;
+    resp.headersSent = true;
+    return resp;
+  };
+  resp.flushHeaders = () => {
+    resp.headersSent = true;
+  };
+  resp.write = (chunk: Uint8Array | string) => {
+    resp.chunks.push(chunk);
+    return true;
+  };
+  resp.end = () => {
+    resp.ended = true;
+    resp.headersSent = true;
+    return resp;
+  };
+  return resp;
+}
+
+test("handleStreamingResponse does not complete when client disconnects", async () => {
+  const encoder = new TextEncoder();
+  const upstream = new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'event: message_delta\ndata: {"usage":{"output_tokens":1}}\n\n',
+          ),
+        );
+      },
+      cancel() {
+        /* expected when the client disconnects */
+      },
+    }),
+  );
+  const resp = makeMockResponse();
+  resp.write = (chunk: Uint8Array | string) => {
+    resp.chunks.push(chunk);
+    resp.emit("close");
+    return true;
+  };
+
+  const result = await handleStreamingResponse(upstream, resp);
+
+  assert.equal(result.clientDisconnected, true);
+  assert.equal(result.completed, false);
+});
+
+test("handleStreamingResponse flushes the final un-terminated SSE event through onEvent", async () => {
+  // Regression cover for: "transformed streaming still drops an
+  // unterminated final event". When the upstream closes the stream
+  // without a trailing newline after the last `data:` line, the
+  // transformer (e.g. responsesSSEToChat) must still receive that
+  // final event so it can emit the [DONE]/finish_reason chunk and so
+  // usage tracking lands. Previously `handleStreamingResponse` did an
+  // `if (done) break;` which silently dropped the leftover line.
+  const encoder = new TextEncoder();
+  const upstream = new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'event: response.output_text.delta\ndata: {"delta":"hi"}\n\n',
+          ),
+        );
+        // Final event has NO trailing \n\n on purpose.
+        controller.enqueue(
+          encoder.encode(
+            'event: response.completed\ndata: {"response":{"status":"completed","usage":{"input_tokens":7,"output_tokens":3}}}',
+          ),
+        );
+        controller.close();
+      },
+    }),
+  );
+
+  const resp = makeMockResponse();
+  const observed: Array<{ event: string; data: any }> = [];
+  const result = await handleStreamingResponse(upstream, resp, {
+    onEvent: (event, data) => {
+      observed.push({ event, data });
+      // Emit the equivalent of a finish chunk on completed.
+      if (event === "response.completed") {
+        return ["data: [DONE]\n\n"];
+      }
+      return [];
+    },
+  });
+
+  // The completed event must reach the transformer.
+  assert.ok(
+    observed.some((e) => e.event === "response.completed"),
+    "response.completed must be observed even without trailing newline",
+  );
+  // [DONE] chunk must have been written to the client.
+  const written = resp.chunks.map((c: any) => String(c)).join("");
+  assert.match(written, /data: \[DONE\]/);
+  // Usage must have been extracted from the final completed event.
+  assert.equal(result.completed, true);
+  assert.equal(result.usage.inputTokens, 7);
+  assert.equal(result.usage.outputTokens, 3);
+});
+
+test("handleStreamingResponse extracts usage from final un-terminated event in pass-through mode", async () => {
+  // Pass-through (no onEvent) writes raw bytes immediately so the
+  // client always sees them, but `extractUsageFromSSE` also needs to
+  // run on the final un-terminated event so the upstream's reported
+  // usage lands in result.usage. Without the flush fix, the final
+  // line stayed in `buffer` and usage was zero.
+  const encoder = new TextEncoder();
+  const upstream = new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'event: message_delta\ndata: {"usage":{"input_tokens":11,"output_tokens":5}}',
+          ),
+        );
+        controller.close();
+      },
+    }),
+  );
+  const resp = makeMockResponse();
+  const result = await handleStreamingResponse(upstream, resp);
+  assert.equal(result.completed, true);
+  assert.equal(result.usage.inputTokens, 11);
+  assert.equal(result.usage.outputTokens, 5);
+});
+
+test("proxyWithRetry stops retry backoff when client disconnects", async () => {
+  const resp = makeMockResponse();
+  const account: any = {
+    token: { email: "x@y.z" },
+  };
+  let upstreamCalls = 0;
+  const manager: any = {
+    provider: "anthropic",
+    getNextAccount: () => ({ account }),
+    recordAttempt: () => {},
+    recordFailure: () => {},
+    refreshAccount: async () => false,
+  };
+
+  const proxyPromise = proxyWithRetry(
+    "TestProxy",
+    resp,
+    {
+      debug: "off",
+    } as any,
+    {
+      manager,
+      maxRetries: 2,
+      upstream: async () => {
+        upstreamCalls++;
+        return new Response("temporarily unavailable", { status: 500 });
+      },
+      success: async () => {},
+    },
+  );
+
+  setTimeout(() => resp.emit("close"), 10);
+  await proxyPromise;
+
+  assert.equal(upstreamCalls, 1);
+  assert.equal(resp.body, undefined);
+});
+
+test("proxyWithRetry does not write terminal error after client disconnects", async () => {
+  const resp = makeMockResponse();
+  const account: any = { token: { email: "x@y.z" } };
+  const manager: any = {
+    provider: "anthropic",
+    getNextAccount: () => ({ account }),
+    recordAttempt: () => {},
+    recordFailure: () => {},
+    refreshAccount: async () => false,
+  };
+
+  let writes = 0;
+  resp.setHeader = (key: string, value: string) => {
+    writes++;
+    resp.headers[key.toLowerCase()] = value;
+    return resp;
+  };
+  const origJson = resp.json;
+  resp.json = (body: any) => {
+    writes++;
+    return origJson.call(resp, body);
+  };
+
+  const proxyPromise = proxyWithRetry(
+    "TestProxy",
+    resp,
+    { debug: "off" } as any,
+    {
+      manager,
+      maxRetries: 1,
+      upstream: async () => {
+        // Client disconnects right as the upstream resolves; the catch in
+        // upstream.text() path may swallow read errors, but the terminal
+        // error response must NOT be written either way.
+        resp.emit("close");
+        return new Response("server boom", {
+          status: 500,
+          headers: { "retry-after": "1" },
+        });
+      },
+      success: async () => {},
+    },
+  );
+  await proxyPromise;
+
+  assert.equal(writes, 0, "no headers/body should be written after disconnect");
+  assert.equal(resp.body, undefined);
 });
 
 // ══════════════════════════════════════════════════
@@ -122,10 +371,7 @@ test("loadConfig normalizes debug mode", () => {
     os.tmpdir(),
     `auth2api-debug-test-${Date.now()}.yaml`,
   );
-  fs.writeFileSync(
-    configPath,
-    'api-keys:\n  - "sk-test"\ndebug: true\n',
-  );
+  fs.writeFileSync(configPath, 'api-keys:\n  - "sk-test"\ndebug: true\n');
   try {
     const config = loadConfig(configPath);
     assert.equal(config.debug, "errors"); // true → "errors"
@@ -214,9 +460,7 @@ test("openaiToAnthropic translates system messages", () => {
       { role: "user", content: "hi" },
     ],
   });
-  assert.deepEqual(result.system, [
-    { type: "text", text: "You are helpful." },
-  ]);
+  assert.deepEqual(result.system, [{ type: "text", text: "You are helpful." }]);
   assert.equal(result.messages.length, 1);
 });
 
@@ -491,7 +735,10 @@ test("anthropicSSEToChat handles tool_use streaming", () => {
   // tool block start
   const startChunks = anthropicSSEToChat(
     "content_block_start",
-    { content_block: { type: "tool_use", id: "call_1", name: "get_weather" }, index: 1 },
+    {
+      content_block: { type: "tool_use", id: "call_1", name: "get_weather" },
+      index: 1,
+    },
     state,
   );
   assert.equal(startChunks.length, 1);
@@ -656,9 +903,7 @@ test("anthropicSSEToResponses handles text streaming", () => {
     usage,
   );
   assert.ok(startEvents.some((e) => e.includes("response.output_item.added")));
-  assert.ok(
-    startEvents.some((e) => e.includes("response.content_part.added")),
-  );
+  assert.ok(startEvents.some((e) => e.includes("response.content_part.added")));
 
   // text delta
   const deltaEvents = anthropicSSEToResponses(
@@ -668,9 +913,7 @@ test("anthropicSSEToResponses handles text streaming", () => {
     "sonnet",
     usage,
   );
-  assert.ok(
-    deltaEvents.some((e) => e.includes("response.output_text.delta")),
-  );
+  assert.ok(deltaEvents.some((e) => e.includes("response.output_text.delta")));
   assert.ok(deltaEvents.some((e) => e.includes('"Hello"')));
 
   // text block stop
@@ -682,9 +925,7 @@ test("anthropicSSEToResponses handles text streaming", () => {
     usage,
   );
   assert.ok(stopEvents.some((e) => e.includes("response.output_text.done")));
-  assert.ok(
-    stopEvents.some((e) => e.includes("response.output_item.done")),
-  );
+  assert.ok(stopEvents.some((e) => e.includes("response.output_item.done")));
 });
 
 test("anthropicSSEToResponses handles message_stop with usage", () => {

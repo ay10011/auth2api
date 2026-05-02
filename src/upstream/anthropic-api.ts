@@ -3,9 +3,11 @@ import { Request } from "express";
 import { IncomingHttpHeaders } from "http";
 import { CloakingConfig, Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
+import { withTimeoutSignal } from "../utils/abort";
 import { extractApiKey, hashApiKey } from "../utils/common";
 
 const BASE_URL = "https://api.anthropic.com";
+const OAUTH_BETA = "oauth-2025-04-20";
 
 /**
  * Dynamic Anthropic-Beta construction — mirrors Claude Code's utils/betas.ts
@@ -143,7 +145,14 @@ function buildHeaders(
   const beta = headers["anthropic-beta"];
 
   if (typeof beta == "string") {
-    headers["anthropic-beta"] = `oauth-2025-04-20,${beta}`;
+    const betas = beta
+      .split(",")
+      .map((b) => b.trim())
+      .filter(Boolean);
+    if (!betas.includes(OAUTH_BETA)) {
+      betas.unshift(OAUTH_BETA);
+    }
+    headers["anthropic-beta"] = [...new Set(betas)].join(",");
   } else {
     headers["anthropic-beta"] = buildBetaHeader(model, !!structured);
   }
@@ -180,6 +189,7 @@ export interface CallMessagesOptions {
   account: AvailableAccount;
   config: Config;
   structured?: boolean;
+  signal?: AbortSignal;
 }
 
 export async function callAnthropicMessages(
@@ -209,7 +219,7 @@ export async function callAnthropicMessages(
     method: "POST",
     headers: newHeaders,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: withTimeoutSignal(timeoutMs, options.signal),
   });
 
   return response;
@@ -219,15 +229,16 @@ export interface CallCountTokensOptions {
   request: Request;
   account: AvailableAccount;
   config: Config;
+  signal?: AbortSignal;
 }
 
 export async function callAnthropicCountTokens(
   options: CallCountTokensOptions,
 ): Promise<Response> {
   const { request, account, config } = options;
-  const body = request.body;
+  const body = request.body ?? {};
   const url = `${BASE_URL}/v1/messages/count_tokens?beta=true`;
-  const model = body.model || "claude-sonnet-4-6";
+  const model = body?.model || "claude-sonnet-4-6";
   const apiKeyHash = hashApiKey(extractApiKey(request.headers));
   const timeoutMs = config.timeouts["count-tokens-ms"];
   const newHeaders = buildHeaders(
@@ -243,7 +254,7 @@ export async function callAnthropicCountTokens(
     method: "POST",
     headers: newHeaders,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: withTimeoutSignal(timeoutMs, options.signal),
   });
 
   return response;

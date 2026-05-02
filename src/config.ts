@@ -12,6 +12,30 @@ export interface CloakingConfig {
   "cli-version"?: string;
   /** Entrypoint value for billing header (default: cli) */
   entrypoint?: string;
+  /**
+   * Codex (ChatGPT) provider — protocol-required headers, NOT identity faking.
+   * Strings live here so upstream flag-name drift can ship as a YAML edit.
+   */
+  codex?: {
+    "user-agent"?: string;
+    originator?: string;
+    "cli-version"?: string;
+    /** Optional: only set if upstream begins requiring an OpenAI-Beta header. */
+    "openai-beta"?: string;
+  };
+  /**
+   * Cursor provider — reverse-engineered, unstable headers for personal local
+   * experiments only. Cursor version-gates requests, so keep these overrideable.
+   */
+  cursor?: {
+    "client-version"?: string;
+    "client-type"?: string;
+    "agent-base-url"?: string;
+    "api-base-url"?: string;
+    "config-version"?: string;
+    "timezone"?: string;
+    "ghost-mode"?: string;
+  };
 }
 
 export interface TimeoutConfig {

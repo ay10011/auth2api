@@ -1,11 +1,14 @@
 import crypto from "crypto";
 import readline from "readline";
-import { loadConfig, resolveAuthDir } from "./config";
-import { AccountManager } from "./accounts/manager";
+import { Config, loadConfig, resolveAuthDir } from "./config";
+import { ProviderId } from "./auth/types";
 import { generatePKCECodes } from "./auth/pkce";
-import { generateAuthURL, exchangeCodeForTokens } from "./auth/oauth";
 import { waitForCallback } from "./auth/callback-server";
+import { importCursorTokenFromLocalStorage } from "./auth/cursor/storage";
+import { runCursorBrowserLogin } from "./auth/cursor/browser-oauth";
+import { buildRegistry, ProviderRegistry } from "./providers/registry";
 import { createServer } from "./server";
+import { notifyServerReload } from "./utils/notify-reload";
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -20,22 +23,80 @@ function prompt(question: string): Promise<string> {
   });
 }
 
-async function doLogin(authDir: string, manual: boolean): Promise<void> {
-  const manager = new AccountManager(authDir);
-  manager.load();
+function parseProviderArg(args: string[]): ProviderId {
+  const flag = args.find((a) => a.startsWith("--provider="));
+  if (!flag) return "anthropic";
+  const value = flag.split("=", 2)[1];
+  if (value === "anthropic" || value === "codex" || value === "cursor")
+    return value;
+  throw new Error(
+    `Unknown provider "${value}". Supported: anthropic, codex, cursor`,
+  );
+}
+
+async function importCursorLogin(
+  config: Config,
+  registry: ProviderRegistry,
+  storagePath?: string,
+): Promise<void> {
+  const provider = registry.get("cursor");
+  const tokenData = importCursorTokenFromLocalStorage(storagePath);
+  provider.manager.addAccount(tokenData);
+  console.log("\nCursor local login imported.");
+  console.log(`Account: ${tokenData.email}`);
+  console.log(`Token expires: ${tokenData.expiresAt}`);
+  console.log(
+    "Note: Cursor provider support is experimental and uses non-public APIs.",
+  );
+  await notifyServerReload(config);
+}
+
+async function browserCursorLogin(
+  config: Config,
+  registry: ProviderRegistry,
+): Promise<void> {
+  const provider = registry.get("cursor");
+  console.log("\nLogging in to cursor (browser flow).");
+  const result = await runCursorBrowserLogin({
+    pollTimeoutMs: 15 * 60 * 1000,
+    onLoginUrl: (url) => {
+      console.log("\nOpen this URL in your browser to authorize Cursor:\n");
+      console.log(url);
+      console.log(
+        '\nAfter signing in, click "Yes, Log In" — auth2api will pick up the token automatically.\n',
+      );
+    },
+  });
+  provider.manager.addAccount(result.token);
+  console.log("Cursor browser login complete.");
+  console.log(`Account: ${result.token.email}`);
+  console.log(`Token expires: ${result.token.expiresAt}`);
+  console.log(
+    "Note: Cursor provider support is experimental and uses non-public APIs.",
+  );
+  await notifyServerReload(config);
+}
+
+async function doLogin(
+  config: Config,
+  registry: ProviderRegistry,
+  providerId: ProviderId,
+  manual: boolean,
+): Promise<void> {
+  const provider = registry.get(providerId);
 
   const pkce = generatePKCECodes();
   const state = crypto.randomBytes(16).toString("hex");
 
-  const authURL = generateAuthURL(state, pkce);
-  console.log("\nOpen this URL in your browser to login:\n");
+  const authURL = provider.buildAuthUrl(state, pkce);
+  console.log(`\nLogging in to ${provider.id}.`);
+  console.log("Open this URL in your browser to login:\n");
   console.log(authURL);
 
   let code: string;
   let returnedState: string;
 
   if (manual) {
-    // Manual mode: user pastes the callback URL from browser
     console.log(
       "\nAfter login, your browser will redirect to a localhost URL that may fail to load.",
     );
@@ -44,7 +105,6 @@ async function doLogin(authDir: string, manual: boolean): Promise<void> {
     );
     const callbackURL = await prompt("Paste callback URL: ");
 
-    // Parse code and state from the pasted URL
     const url = new URL(callbackURL);
     code = url.searchParams.get("code") || "";
     returnedState = url.searchParams.get("state") || "";
@@ -58,23 +118,27 @@ async function doLogin(authDir: string, manual: boolean): Promise<void> {
       process.exit(1);
     }
   } else {
-    // Auto mode: local callback server
     console.log("\nWaiting for OAuth callback...\n");
-    const result = await waitForCallback();
+    const result = await waitForCallback({
+      port: provider.oauth.callbackPort,
+      callbackPath: provider.oauth.callbackPath,
+    });
     code = result.code;
     returnedState = result.state;
   }
 
   console.log("Exchanging code for tokens...");
-  const tokenData = await exchangeCodeForTokens(
+  const tokenData = await provider.exchangeCode(
     code,
     returnedState,
     state,
     pkce,
   );
-  manager.addAccount(tokenData);
+  if (!tokenData.provider) tokenData.provider = provider.id;
+  provider.manager.addAccount(tokenData);
   console.log(`\nLogin successful! Account: ${tokenData.email}`);
   console.log(`Token expires: ${tokenData.expiresAt}`);
+  await notifyServerReload(config);
 }
 
 async function startServer(): Promise<void> {
@@ -84,18 +148,27 @@ async function startServer(): Promise<void> {
   const config = loadConfig(configPath);
   const authDir = resolveAuthDir(config["auth-dir"]);
 
-  const manager = new AccountManager(authDir);
-  manager.load();
+  const registry = buildRegistry(authDir);
+  for (const p of registry.all()) p.manager.load();
 
-  if (manager.accountCount === 0) {
-    console.log("No accounts found. Run with --login to add an account first.");
+  const totalAccounts = registry
+    .all()
+    .reduce((sum, p) => sum + p.manager.accountCount, 0);
+  if (totalAccounts === 0) {
+    console.log(
+      "No accounts found. Run with --login (and optionally --provider=codex) to add an account first.",
+    );
     process.exit(1);
   }
 
-  manager.startAutoRefresh();
-  manager.startStatsLogger();
+  for (const p of registry.all()) {
+    if (p.manager.accountCount > 0) {
+      p.manager.startAutoRefresh();
+      p.manager.startStatsLogger();
+    }
+  }
 
-  const app = createServer(config, manager);
+  const app = createServer(config, registry);
   const host = config.host || "127.0.0.1";
   const port = config.port;
 
@@ -112,8 +185,10 @@ async function startServer(): Promise<void> {
   });
 
   process.on("SIGINT", () => {
-    manager.stopAutoRefresh();
-    manager.stopStatsLogger();
+    for (const p of registry.all()) {
+      p.manager.stopAutoRefresh();
+      p.manager.stopStatsLogger();
+    }
     process.exit(0);
   });
 }
@@ -126,7 +201,21 @@ async function main(): Promise<void> {
 
   if (args.includes("--login")) {
     const manual = args.includes("--manual");
-    await doLogin(authDir, manual);
+    const providerId = parseProviderArg(args);
+    const cursorStorage = args
+      .find((a) => a.startsWith("--cursor-storage="))
+      ?.split("=", 2)[1];
+    const registry = buildRegistry(authDir);
+    for (const p of registry.all()) p.manager.load();
+    if (providerId === "cursor") {
+      if (cursorStorage || args.includes("--cursor-import-local")) {
+        await importCursorLogin(config, registry, cursorStorage);
+      } else {
+        await browserCursorLogin(config, registry);
+      }
+    } else {
+      await doLogin(config, registry, providerId, manual);
+    }
   } else {
     await startServer();
   }

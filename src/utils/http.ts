@@ -1,11 +1,11 @@
 import { Response as ExpressResponse } from "express";
-import { timeout } from "./common";
 import {
   AccountFailureKind,
   AccountManager,
   AccountResult,
   AvailableAccount,
 } from "../accounts/manager";
+import { ProviderId } from "../auth/types";
 import { Config, isDebugLevel } from "../config";
 
 export const MAX_RETRIES = 3;
@@ -38,11 +38,19 @@ const FAILURE_RESPONSES: Record<
 export function accountUnavailable(
   resp: ExpressResponse,
   result: Extract<AccountResult, { account: null }>,
+  provider: ProviderId,
 ): void {
   const { failureKind, retryAfterMs } = result;
 
+  // No accounts at all for this provider.
   if (!failureKind) {
-    resp.status(503).json({ error: { message: "No available account" } });
+    resp.status(503).json({
+      error: {
+        message: `No ${provider} accounts loaded. Run: auth2api --login --provider=${provider}`,
+        type: "no_account_for_provider",
+        provider,
+      },
+    });
     return;
   }
 
@@ -57,80 +65,191 @@ export function accountUnavailable(
 }
 
 export interface ProxyOptions {
-  upstream: (account: AvailableAccount) => Promise<Response>;
+  manager: AccountManager;
+  upstream: (
+    account: AvailableAccount,
+    signal: AbortSignal,
+  ) => Promise<Response>;
   success: (upstream: Response, account: AvailableAccount) => Promise<void>;
+  /**
+   * Optional translator from upstream error body to client-format error body.
+   * Required when the inbound and outbound formats differ (e.g. OpenAI Chat
+   * client hitting Anthropic upstream) so we don't leak provider-shaped errors.
+   */
+  errorAdapter?: (status: number, body: string) => any;
   maxRetries?: number;
+}
+
+function waitForRetry(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(true);
+    }, ms);
+    const onAbort = () => {
+      cleanup();
+      resolve(false);
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export async function proxyWithRetry(
   tag: string,
   resp: ExpressResponse,
   config: Config,
-  manager: AccountManager,
   options: ProxyOptions,
 ): Promise<void> {
+  const { manager } = options;
   const maxRetries = options.maxRetries ?? MAX_RETRIES;
   let lastStatus = 500;
   let lastErrBody = "";
+  let lastRetryAfter: string | null = null;
   const refreshedAccounts = new Set<string>();
 
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const result = manager.getNextAccount();
-    if (!result.account) {
-      return accountUnavailable(resp, result);
+  const requestController = new AbortController();
+  const abortRequest = () => {
+    if (!requestController.signal.aborted) {
+      requestController.abort(new Error("client disconnected"));
     }
-    const account = result.account;
-    manager.recordAttempt(account.token.email);
+  };
+  resp.on("close", abortRequest);
 
-    let upstream: Response;
-    try {
-      upstream = await options.upstream(account);
-    } catch (err: any) {
-      manager.recordFailure(account.token.email, "network", err.message);
-      if (isDebugLevel(config.debug, "errors")) {
-        console.error(
-          `${tag} attempt ${attempt + 1} network failure: ${err.message}`,
-        );
+  try {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const result = manager.getNextAccount();
+      if (!result.account) {
+        return accountUnavailable(resp, result, manager.provider);
       }
+      const account = result.account;
+      manager.recordAttempt(account.token.email);
+
+      let upstream: Response;
+      try {
+        upstream = await options.upstream(account, requestController.signal);
+      } catch (err: any) {
+        if (requestController.signal.aborted) return;
+        manager.recordFailure(account.token.email, "network", err.message);
+        if (isDebugLevel(config.debug, "errors")) {
+          console.error(
+            `${tag} attempt ${attempt + 1} network failure: ${err.message}`,
+          );
+        }
+        if (attempt < maxRetries - 1) {
+          const shouldContinue = await waitForRetry(
+            (attempt + 1) * 1000,
+            requestController.signal,
+          );
+          if (!shouldContinue) return;
+          continue;
+        }
+        resp.status(502).json({ error: { message: "Upstream network error" } });
+        return;
+      }
+
+      if (upstream.ok) {
+        try {
+          await options.success(upstream, account);
+        } catch (err: any) {
+          if (requestController.signal.aborted || resp.destroyed) return;
+          const message = err?.message || String(err);
+          if (isDebugLevel(config.debug, "errors")) {
+            console.error(`${tag} success handler failed: ${message}`);
+          }
+          if (!resp.headersSent) {
+            resp
+              .status(500)
+              .json({ error: { message: "Internal server error" } });
+          } else if (!resp.writableEnded) {
+            resp.end();
+          }
+        }
+        return;
+      }
+
+      lastStatus = upstream.status;
+      lastRetryAfter = upstream.headers.get("retry-after");
+      try {
+        lastErrBody = await upstream.text();
+        if (isDebugLevel(config.debug, "errors")) {
+          console.error(
+            `${tag} attempt ${attempt + 1} failed (${lastStatus}): ${lastErrBody}`,
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+
+      if (lastStatus === 401) {
+        // Only refresh once per account per proxy attempt. A second 401 after a
+        // successful refresh usually means the cause isn't the access token (bad
+        // header, account state, server-side issue) — refreshing again would
+        // burn a freshly rotated refresh token for nothing, and on Codex this
+        // races with the documented refresh_token_reused failure mode
+        // (openai/codex#10332).
+        if (!refreshedAccounts.has(account.token.email)) {
+          refreshedAccounts.add(account.token.email);
+          const refreshed = await manager.refreshAccount(account.token.email);
+          if (refreshed) {
+            attempt--;
+            continue;
+          }
+        }
+      } else if (
+        lastStatus === 403 ||
+        lastStatus === 429 ||
+        lastStatus >= 500
+      ) {
+        // Account-level failures: cooldown, may retry on another account.
+        manager.recordFailure(account.token.email, classifyFailure(lastStatus));
+      }
+      // Other 4xx (400, 404, 422, …) are client request errors — the account is
+      // healthy, the request body is bad. Do NOT cool down the account, and do
+      // NOT retry; surface the upstream error to the client immediately.
+
+      if (!RETRYABLE_STATUSES.has(lastStatus)) break;
       if (attempt < maxRetries - 1) {
-        await timeout((attempt + 1) * 1000);
-        continue;
-      }
-      resp.status(502).json({ error: { message: "Upstream network error" } });
-      return;
-    }
-
-    if (upstream.ok) {
-      await options.success(upstream, account);
-      return;
-    }
-
-    lastStatus = upstream.status;
-    try {
-      lastErrBody = await upstream.text();
-      if (isDebugLevel(config.debug, "errors")) {
-        console.error(
-          `${tag} attempt ${attempt + 1} failed (${lastStatus}): ${lastErrBody}`,
+        const shouldContinue = await waitForRetry(
+          (attempt + 1) * 1000,
+          requestController.signal,
         );
+        if (!shouldContinue) return;
       }
+    }
+  } finally {
+    resp.off("close", abortRequest);
+  }
+
+  // Client already gone — don't try to write the terminal error response.
+  if (
+    requestController.signal.aborted ||
+    resp.destroyed ||
+    resp.writableEnded
+  ) {
+    return;
+  }
+
+  // Forward upstream Retry-After verbatim — most useful on 429.
+  if (lastRetryAfter) resp.setHeader("Retry-After", lastRetryAfter);
+
+  // Translate upstream error body if an adapter is provided. This prevents
+  // provider-shaped errors (e.g. Anthropic JSON, Codex JSON) leaking into a
+  // client expecting OpenAI Chat error shape.
+  const adapter = options.errorAdapter;
+  if (adapter) {
+    try {
+      const translated = adapter(lastStatus, lastErrBody);
+      resp.status(lastStatus).json(translated);
+      return;
     } catch {
-      /* ignore */
-    }
-
-    if (lastStatus === 401) {
-      const refreshed = await manager.refreshAccount(account.token.email);
-      if (refreshed && !refreshedAccounts.has(account.token.email)) {
-        refreshedAccounts.add(account.token.email);
-        attempt--;
-        continue;
-      }
-    } else {
-      manager.recordFailure(account.token.email, classifyFailure(lastStatus));
-    }
-
-    if (!RETRYABLE_STATUSES.has(lastStatus)) break;
-    if (attempt < maxRetries - 1) {
-      await timeout((attempt + 1) * 1000);
+      // fall through to default handling
     }
   }
 

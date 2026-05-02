@@ -1,6 +1,6 @@
 import express from "express";
 import { Config, isDebugLevel } from "./config";
-import { AccountManager } from "./accounts/manager";
+import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey } from "./utils/common";
 import {
   createChatCompletionsHandler,
@@ -10,17 +10,6 @@ import {
   createMessagesHandler,
   createCountTokensHandler,
 } from "./handlers/anthropic";
-
-const SUPPORTED_MODELS = [
-  "claude-opus-4-7",
-  "claude-opus-4-6",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5-20251001",
-  "claude-haiku-4-5",
-  "opus",
-  "sonnet",
-  "haiku",
-] as const;
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -52,7 +41,7 @@ cleanupTimer.unref();
 
 export function createServer(
   config: Config,
-  manager: AccountManager,
+  registry: ProviderRegistry,
 ): express.Application {
   const app = express();
 
@@ -123,38 +112,70 @@ export function createServer(
 
   app.use("/admin", requireApiKey);
   app.get("/admin/accounts", (_req, res) => {
+    const providers: Record<
+      string,
+      { accounts: unknown[]; account_count: number }
+    > = {};
+    for (const p of registry.all()) {
+      providers[p.id] = {
+        accounts: p.manager.getSnapshots(),
+        account_count: p.manager.accountCount,
+      };
+    }
     res.json({
-      accounts: manager.getSnapshots(),
-      account_count: manager.accountCount,
+      providers,
+      generated_at: new Date().toISOString(),
+    });
+  });
+
+  // POST /admin/reload — re-reads token files from auth-dir and reconciles
+  // each provider's in-memory state. Called automatically by `--login` after
+  // a successful re-auth (see notifyServerReload in src/index.ts), and
+  // available for manual use via curl. See AccountManager.reload() for
+  // upsert semantics.
+  app.post("/admin/reload", async (_req, res) => {
+    const reloaded: Record<string, unknown> = {};
+    for (const p of registry.all()) {
+      try {
+        reloaded[p.id] = await p.manager.reload();
+      } catch (err: any) {
+        reloaded[p.id] = { error: err?.message || String(err) };
+      }
+    }
+    res.json({
+      reloaded,
       generated_at: new Date().toISOString(),
     });
   });
 
   app.use("/v1", requireApiKey);
-  app.get("/v1/models", (_req, res) => {
-    res.json({
-      object: "list",
-      data: SUPPORTED_MODELS.map((id) => ({
-        id,
+  app.get("/v1/models", async (_req, res) => {
+    const created = Math.floor(Date.now() / 1000);
+    const providers = registry.withAccounts();
+    const lists = await Promise.all(providers.map((p) => p.listModels()));
+    const data = lists.flatMap((models) =>
+      models.map((m) => ({
+        id: m.id,
         object: "model",
-        created: Math.floor(Date.now() / 1000),
-        owned_by: "anthropic",
+        created,
+        owned_by: m.owned_by,
       })),
-    });
+    );
+    res.json({ object: "list", data });
   });
 
   // Routes — OpenAI compatible
   app.post(
     "/v1/chat/completions",
-    createChatCompletionsHandler(config, manager),
+    createChatCompletionsHandler(config, registry),
   );
-  app.post("/v1/responses", createResponsesHandler(config, manager));
+  app.post("/v1/responses", createResponsesHandler(config, registry));
 
   // Routes — Anthropic native passthrough
-  app.post("/v1/messages", createMessagesHandler(config, manager));
+  app.post("/v1/messages", createMessagesHandler(config, registry));
   app.post(
     "/v1/messages/count_tokens",
-    createCountTokensHandler(config, manager),
+    createCountTokensHandler(config, registry),
   );
 
   return app;
