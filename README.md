@@ -6,7 +6,7 @@ A lightweight OAuth-to-API proxy that turns your Claude (Anthropic), ChatGPT (Op
 
 auth2api is intentionally small and focused:
 
-- bring your own Claude / ChatGPT / Cursor login
+- bring your own Claude / ChatGPT / Cursor login (one or more accounts per provider)
 - one local or self-hosted proxy
 - automatic per-provider routing by model name
 
@@ -16,10 +16,12 @@ It is not trying to be a large multi-provider gateway. If you want a compact, un
 
 - **Lightweight by design** — small codebase, minimal moving parts
 - **Multiple providers, one proxy** — Claude OAuth, OpenAI Codex (ChatGPT) OAuth, and an experimental Cursor local-login provider coexist; per-provider account pools, cooldown, refresh, and stats
+- **Multi-account support** — load multiple OAuth tokens per provider with sticky routing, automatic failover, and per-account usage tracking
 - **OpenAI-compatible API** — supports `/v1/chat/completions`, `/v1/responses`, and `/v1/models`
 - **Claude native passthrough** — supports `/v1/messages` and `/v1/messages/count_tokens`
 - **Claude Code friendly** — works with both `Authorization: Bearer` and `x-api-key`
 - **Streaming, tools, images, and reasoning** — covers the main usage patterns without a large framework
+- **Structured JSON output** — supports `response_format` (Chat API) and `text.format` (Responses API) for structured outputs
 - **Per-account health handling** — cooldown, retry, token refresh (with concurrency lock), and `/admin/accounts` snapshot
 - **Basic safety defaults** — timing-safe API key validation, per-IP rate limiting, localhost-only browser CORS
 
@@ -75,7 +77,7 @@ node dist/index.js --login --provider=codex --manual
 
 Open the printed URL in your browser. After authorizing, your browser will redirect to a `localhost` URL that fails to load — copy the full URL from the address bar and paste it back into the terminal.
 
-You can log in to multiple providers; auth2api stores tokens side-by-side in `auth-dir` (`claude-<email>.json`, `codex-<email>.json`, and `cursor-<email>.json`) and routes inbound requests to the matching pool by model name. Logging in to only one provider is fine — the others simply have no advertised models.
+You can run `--login` multiple times to add additional accounts (per provider). auth2api stores tokens side-by-side in `auth-dir` (`claude-<email>.json`, `codex-<email>.json`, and `cursor-<email>.json`) and routes inbound requests to the matching pool by model name. Logging in to only one provider is fine — the others simply have no advertised models.
 
 > **Note on Codex:** The codex provider relays your ChatGPT Plus/Pro subscription quota. OpenAI's ToS does not officially permit relaying ChatGPT sessions through third-party tools — use this for your own personal local consumption only.
 
@@ -88,8 +90,6 @@ node dist/index.js
 ```
 
 The server starts on `http://127.0.0.1:8317` by default. On first run, an API key is auto-generated and saved to `config.yaml`.
-
-If the configured Claude account is temporarily cooled down after upstream rate limiting, auth2api now returns `429 Rate limited on the configured account` instead of a generic `503`.
 
 ## Configuration
 
@@ -106,29 +106,20 @@ api-keys:
 
 body-limit: "200mb"       # maximum JSON request body size, useful for large-context usage
 
+timeouts:
+  messages-ms: 120000         # non-stream /v1/messages timeout
+  stream-messages-ms: 600000  # stream /v1/messages timeout (10 min, suitable for Claude Code)
+  count-tokens-ms: 30000      # /v1/messages/count_tokens timeout
+
+# Request fingerprinting — controls how auth2api mimics Claude Code CLI
 cloaking:
-  mode: "auto"            # auto | always | never
-  strict-mode: false
-  sensitive-words: []
-  cache-user-id: false
+  cli-version: "2.1.88"   # CLI version to impersonate
+  entrypoint: "cli"        # billing attribution entrypoint (cli, mcp, sdk, etc.)
 
 debug: "off"            # off | errors | verbose
 ```
 
-Timeouts can also be configured if you run long Claude Code tasks:
-
-```yaml
-timeouts:
-  messages-ms: 120000
-  stream-messages-ms: 600000
-  count-tokens-ms: 30000
-```
-
-By default, streaming upstream requests are allowed to run for 10 minutes before auth2api aborts them.
-
-The default request body limit is `200mb`, which is more suitable for large Claude Code contexts than the previous fixed `20mb`.
-
-`debug` now supports three levels:
+`debug` supports three levels:
 - `off`: no extra logs
 - `errors`: log upstream/network failures and upstream error bodies
 - `verbose`: include `errors` logs plus per-request method, path, status, and duration
@@ -281,17 +272,19 @@ claude
 
 Claude Code uses the native `/v1/messages` endpoint which auth2api passes through directly. Both `Authorization: Bearer` and `x-api-key` authentication headers are supported.
 
-## Single-account mode
+## Multi-account
 
-This proxy supports exactly one Claude OAuth account at a time.
+auth2api supports multiple Claude OAuth accounts. Each account is stored as a separate token file in the auth directory.
 
-- Running `--login` again refreshes the stored token for the same account.
-- If a different account is already stored, auth2api refuses to overwrite it and asks you to remove the existing token first.
-- If more than one token file exists in the auth directory, auth2api exits with an error until you clean up the extra files.
+- Run `--login` once per account to add tokens
+- Requests are routed using sticky selection — the same account is reused until it hits a cooldown
+- On rate limit or failure, auth2api automatically fails over to the next available account
+- Per-account token usage (input, output, cache) is tracked and logged periodically
+- Use `/admin/accounts` to inspect all account states
 
 ## Admin status
 
-Use `/admin/accounts` with your configured API key to inspect the current account state:
+Use `/admin/accounts` with your configured API key to inspect the current account states:
 
 ```bash
 curl http://127.0.0.1:8317/admin/accounts \
@@ -310,7 +303,7 @@ Response shape (one entry per logged-in provider):
 }
 ```
 
-Each account snapshot carries availability, cooldown, failure counters, last refresh time, and per-account token usage including `totalReasoningOutputTokens` (reasoning models like `gpt-5.5` consume hidden reasoning tokens that aren't part of the visible output). Codex accounts also carry `planType` (e.g. `"plus"` / `"pro"` / `"free"`) extracted from the OAuth `id_token`. If a refresh token was permanently invalidated (`refresh_token_reused`/`expired`/`invalidated`), the account enters a 24-hour terminal cooldown with `lastError` set to a message pointing at `--login --provider=<provider>` for re-authorization.
+Each account snapshot carries availability, cooldown, failure counters, last refresh time, request statistics, and per-account token usage including `totalReasoningOutputTokens` (reasoning models like `gpt-5.5` consume hidden reasoning tokens that aren't part of the visible output). Codex accounts also carry `planType` (e.g. `"plus"` / `"pro"` / `"free"`) extracted from the OAuth `id_token`. If a refresh token was permanently invalidated (`refresh_token_reused`/`expired`/`invalidated`), the account enters a 24-hour terminal cooldown with `lastError` set to a message pointing at `--login --provider=<provider>` for re-authorization.
 
 ### Re-authenticating without restart
 
@@ -341,11 +334,11 @@ Failure modes of the auto-notify (printed by `--login`):
 
 - `Notified running auth2api server to reload tokens.` — success, server picked up the new token.
 - `(no auth2api server detected at <host>:<port> — token saved, will be loaded next start)` — connection refused / timeout. Common case when no server is running; not an error.
-- `auth2api server is running but rejected the reload (HTTP 401/403). The api-keys in config.yaml may differ from the running server's; restart the server to pick up the new token.` — actionable: either edit your config back to match, or restart so the server picks up the new key set.
+- `auth2api server is running but rejected the reload (HTTP 401/403). The api-keys in config.yaml may differ from the running server's; restart the server to pick up the new key set.` — actionable: either edit your config back to match, or restart so the server picks up the new key set.
 
-## Smoke tests
+## Tests
 
-A minimal automated smoke test suite is included and uses mocked upstream responses, so it does not call the real Claude service:
+A test suite is included using mocked upstream responses (no real Claude service calls):
 
 ```bash
 npm run test:smoke
