@@ -2,6 +2,7 @@ import { ProviderId } from "../auth/types";
 import { resolveModel } from "../upstream/translator";
 import { buildAnthropicProvider } from "./anthropic";
 import { buildCodexProvider } from "./codex";
+import { buildCursorProvider } from "./cursor";
 import { Provider } from "./types";
 
 export interface ProviderRegistry {
@@ -16,8 +17,9 @@ export interface ProviderRegistry {
 export function buildRegistry(authDir: string): ProviderRegistry {
   const anthropic = buildAnthropicProvider(authDir);
   const codex = buildCodexProvider(authDir);
-  const byId: Record<ProviderId, Provider> = { anthropic, codex };
-  const ordered: Provider[] = [anthropic, codex];
+  const cursor = buildCursorProvider(authDir);
+  const byId: Record<ProviderId, Provider> = { anthropic, codex, cursor };
+  const ordered: Provider[] = [anthropic, codex, cursor];
 
   return {
     get: (id) => {
@@ -27,11 +29,26 @@ export function buildRegistry(authDir: string): ProviderRegistry {
     },
     forModel: (model) => {
       const resolved = resolveModel(model);
-      // Prefer explicit provider match. Codex regex first because anthropic's
-      // regex is also a fallback; explicit match avoids surprises on aliases.
+      // Explicit `cursor-` / `cr/` prefix always wins so users can force the
+      // Cursor backend when they have multiple providers logged in.
+      if (cursor.matchesModel(resolved)) return cursor;
+
+      // "Cursor exclusive" mode: when only Cursor has accounts, route every
+      // unknown / Anthropic-style / OpenAI-style model through Cursor. This
+      // lets clients with hard-coded names (`claude-sonnet-4-5`, `gpt-5.5`,
+      // `opus`) work against auth2api without a `cursor-` prefix.
+      const cursorOnly =
+        cursor.manager.accountCount > 0 &&
+        anthropic.manager.accountCount === 0 &&
+        codex.manager.accountCount === 0;
+      if (cursorOnly) return cursor;
+
+      // Multi-provider setups: fall back to the explicit family routes.
       if (codex.matchesModel(resolved)) return codex;
       if (anthropic.matchesModel(resolved)) return anthropic;
-      // Default to anthropic for unknown models — preserves prior behaviour.
+      // Unknown model + multi-provider: keep historical behaviour and
+      // dispatch to anthropic so the client gets a clear "no account" error
+      // for the right provider.
       return anthropic;
     },
     all: () => ordered.slice(),

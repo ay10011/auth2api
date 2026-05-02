@@ -69,6 +69,7 @@ export function buildAnthropicProvider(authDir: string): Provider {
         request: opts.request,
         account: opts.account,
         config: opts.config,
+        signal: opts.signal,
       }),
     applyCloaking: (opts: CloakingContext) => applyCloaking(opts),
   };

@@ -13,6 +13,7 @@ export interface UpstreamCallContext {
   account: AvailableAccount;
   config: Config;
   structured?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface CloakingContext {

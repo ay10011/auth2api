@@ -23,6 +23,19 @@ export interface CloakingConfig {
     /** Optional: only set if upstream begins requiring an OpenAI-Beta header. */
     "openai-beta"?: string;
   };
+  /**
+   * Cursor provider — reverse-engineered, unstable headers for personal local
+   * experiments only. Cursor version-gates requests, so keep these overrideable.
+   */
+  cursor?: {
+    "client-version"?: string;
+    "client-type"?: string;
+    "agent-base-url"?: string;
+    "api-base-url"?: string;
+    "config-version"?: string;
+    "timezone"?: string;
+    "ghost-mode"?: string;
+  };
 }
 
 export interface TimeoutConfig {

@@ -1,4 +1,4 @@
-export type ProviderId = "anthropic" | "codex";
+export type ProviderId = "anthropic" | "codex" | "cursor";
 
 export interface PKCECodes {
   codeVerifier: string;
@@ -17,6 +17,16 @@ export interface TokenData {
   lastRefreshAt?: string;
   /** Codex only — raw chatgpt_plan_type claim from id_token (free/plus/pro/…). */
   planType?: string;
+  /** Cursor only — stable machine id read from Cursor's local storage. */
+  cursorServiceMachineId?: string;
+  /** Cursor only — client version accepted by Cursor's internal API. */
+  cursorClientVersion?: string;
+  /** Cursor only — config version header value. */
+  cursorConfigVersion?: string;
+  /** Cursor only — OAuth client id used for refresh. */
+  cursorClientId?: string;
+  /** Cursor only — membership tier from Cursor local storage. */
+  cursorMembershipType?: string;
 }
 
 export interface TokenStorage {
@@ -29,4 +39,9 @@ export interface TokenStorage {
   account_uuid?: string;
   id_token?: string;
   plan_type?: string;
+  cursor_service_machine_id?: string;
+  cursor_client_version?: string;
+  cursor_config_version?: string;
+  cursor_client_id?: string;
+  cursor_membership_type?: string;
 }

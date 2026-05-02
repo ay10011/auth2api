@@ -8,9 +8,11 @@ import { decodeJwtPayload } from "../utils/jwt";
 const FILENAME_PREFIX: Record<ProviderId, string> = {
   anthropic: "claude",
   codex: "codex",
+  cursor: "cursor",
 };
 
 function normaliseProvider(type: TokenStorage["type"] | undefined): ProviderId {
+  if (type === "cursor") return "cursor";
   if (type === "codex") return "codex";
   return "anthropic"; // "claude" or missing → anthropic (legacy files)
 }
@@ -43,6 +45,11 @@ export function tokenToStorage(data: TokenData): TokenStorage {
     account_uuid: data.accountUuid,
     id_token: data.idToken,
     plan_type: data.planType,
+    cursor_service_machine_id: data.cursorServiceMachineId,
+    cursor_client_version: data.cursorClientVersion,
+    cursor_config_version: data.cursorConfigVersion,
+    cursor_client_id: data.cursorClientId,
+    cursor_membership_type: data.cursorMembershipType,
   };
 }
 
@@ -58,6 +65,11 @@ export function storageToToken(storage: TokenStorage): TokenData {
     idToken: storage.id_token,
     lastRefreshAt: storage.last_refresh,
     planType: storage.plan_type ?? planTypeFromIdToken(storage.id_token),
+    cursorServiceMachineId: storage.cursor_service_machine_id,
+    cursorClientVersion: storage.cursor_client_version,
+    cursorConfigVersion: storage.cursor_config_version,
+    cursorClientId: storage.cursor_client_id,
+    cursorMembershipType: storage.cursor_membership_type,
   };
 }
 
@@ -84,7 +96,11 @@ export function loadAllTokens(
   const files = allFiles.filter((f) => {
     if (!f.endsWith(".json")) return false;
     if (matchPrefix) return f.startsWith(`${matchPrefix}-`);
-    return f.startsWith("claude-") || f.startsWith("codex-");
+    return (
+      f.startsWith("claude-") ||
+      f.startsWith("codex-") ||
+      f.startsWith("cursor-")
+    );
   });
   const tokens: TokenData[] = [];
   for (const file of files) {

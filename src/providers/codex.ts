@@ -55,6 +55,7 @@ export function buildCodexProvider(authDir: string): Provider {
         request: opts.request,
         account: opts.account,
         config: opts.config,
+        signal: opts.signal,
       }),
     // No callCountTokens — codex backend has no equivalent endpoint.
     // No applyCloaking — protocol headers live in codex-api.ts; identity

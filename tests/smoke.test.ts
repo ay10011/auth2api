@@ -85,6 +85,17 @@ async function startApp(
   return server;
 }
 
+async function startAppWithLoadedRegistry(
+  config: Config,
+): Promise<http.Server> {
+  const registry = buildRegistry(config["auth-dir"]);
+  for (const provider of registry.all()) provider.manager.load();
+  const app = createServer(config, registry);
+  const server = createHttpServer(app);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return server;
+}
+
 async function stopApp(server: http.Server): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     server.close((err) => {
@@ -143,6 +154,55 @@ async function requestJson(options: {
   });
 }
 
+async function requestText(options: {
+  server: http.Server;
+  method: string;
+  path: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+}): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
+  const address = serverAddress(options.server);
+  const payload = options.body ? JSON.stringify(options.body) : undefined;
+
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port: address.port,
+        method: options.method,
+        path: options.path,
+        headers: {
+          ...(payload
+            ? {
+                "Content-Type": "application/json",
+                "Content-Length": Buffer.byteLength(payload).toString(),
+              }
+            : {}),
+          ...(options.headers || {}),
+        },
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("end", () => {
+          resolve({
+            status: res.statusCode || 0,
+            body: data,
+            headers: res.headers,
+          });
+        });
+      },
+    );
+
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
 function serverAddress(server: http.Server): AddressInfo {
   const address = server.address();
   if (!address || typeof address === "string") {
@@ -162,6 +222,33 @@ function withMockedFetch(
   return () => {
     global.fetch = originalFetch;
   };
+}
+
+function encodeVarintBuf(value: number): Buffer {
+  const out: number[] = [];
+  let n = value >>> 0;
+  while (n >= 0x80) {
+    out.push((n & 0x7f) | 0x80);
+    n >>>= 7;
+  }
+  out.push(n);
+  return Buffer.from(out);
+}
+
+function encodeBytesField(field: number, payload: Buffer): Buffer {
+  const tag = encodeVarintBuf((field << 3) | 2);
+  const len = encodeVarintBuf(payload.length);
+  return Buffer.concat([tag, len, payload]);
+}
+
+function connectProtoTextFrame(text: string): Uint8Array {
+  const inner = encodeBytesField(1, Buffer.from(text, "utf8"));
+  const outer = encodeBytesField(2, inner);
+  const frame = Buffer.alloc(5 + outer.length);
+  frame[0] = 0;
+  frame.writeUInt32BE(outer.length, 1);
+  outer.copy(frame, 5);
+  return frame;
 }
 
 test("accepts x-api-key auth and serves models/admin state", async (t) => {
@@ -867,13 +954,15 @@ test("loadConfig converts YAML api-keys array to Set", () => {
 test("POST /admin/reload reloads token from disk; subsequent request uses new bearer", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   // Existing in-memory token = "old-access". Disk will be rewritten to "new-access" mid-test.
-  const manager = makeManager(authDir, [makeToken({ accessToken: "old-access" })]);
+  const manager = makeManager(authDir, [
+    makeToken({ accessToken: "old-access" }),
+  ]);
 
   const calls: { url: string; auth: string }[] = [];
   const restoreFetch = withMockedFetch(async (input, init) => {
     const url = String(input);
     const auth =
-      ((init?.headers as Record<string, string> | undefined)?.Authorization) ||
+      (init?.headers as Record<string, string> | undefined)?.Authorization ||
       "";
     calls.push({ url, auth });
     if (url.startsWith("https://api.anthropic.com/v1/messages")) {
@@ -943,10 +1032,7 @@ test("POST /admin/reload reloads token from disk; subsequent request uses new be
     },
   });
   assert.equal(chatResp.status, 200);
-  assert.equal(
-    chatResp.body.choices[0].message.content,
-    "hello after reload",
-  );
+  assert.equal(chatResp.body.choices[0].message.content, "hello after reload");
   // Final upstream call must have used the new bearer (no refresh-and-retry).
   const upstream = calls.filter((c) =>
     c.url.startsWith("https://api.anthropic.com/v1/messages"),
@@ -975,4 +1061,1010 @@ test("POST /admin/reload requires the API key", async (t) => {
     headers: { Authorization: "Bearer wrong" },
   });
   assert.equal(wrongAuth.status, 403);
+});
+
+test("count_tokens with empty body returns upstream client error, not network error", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      "https://api.anthropic.com/v1/messages/count_tokens?beta=true",
+    );
+    assert.equal(init?.body, "{}");
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: "messages is required",
+          type: "invalid_request_error",
+        },
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/messages/count_tokens",
+    headers: { Authorization: "Bearer test-key" },
+  });
+
+  assert.equal(resp.status, 400);
+  assert.equal(resp.body.error.message, "messages is required");
+});
+
+test("claude-cli anthropic-beta passthrough deduplicates oauth beta", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const restoreFetch = withMockedFetch(async (_input, init) => {
+    const headers = init?.headers as Record<string, string>;
+    assert.equal(headers["anthropic-beta"], "oauth-2025-04-20,custom-beta");
+    return new Response(
+      JSON.stringify({
+        id: "msg_1",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/messages",
+    headers: {
+      Authorization: "Bearer test-key",
+      "User-Agent": "claude-cli/2.1.88",
+      "anthropic-beta": "oauth-2025-04-20,custom-beta,custom-beta",
+    },
+    body: {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hi" }],
+    },
+  });
+
+  assert.equal(resp.status, 200);
+});
+
+test("codex responses upstream errors are normalized to OpenAI error shape", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+  const restoreFetch = withMockedFetch(async (input) => {
+    assert.equal(
+      String(input),
+      "https://chatgpt.com/backend-api/codex/responses",
+    );
+    return new Response(JSON.stringify({ detail: "bad codex request" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.3-codex",
+      input: [{ role: "user", content: "hi" }],
+    },
+  });
+
+  assert.equal(resp.status, 400);
+  assert.deepEqual(resp.body, {
+    error: { message: "bad codex request", type: "upstream_error" },
+  });
+});
+
+test("cursor responses proxy converts minimal Connect-RPC stream to Responses SSE", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "cursor-access",
+      refreshToken: "cursor-refresh",
+      email: "cursor@example.com",
+      accountUuid: "cursor-machine",
+      provider: "cursor",
+      cursorServiceMachineId: "cursor-machine",
+      cursorClientVersion: "cli-test",
+      cursorConfigVersion: "config-test",
+    }),
+  );
+
+  const { __setCursorTransport } = await import("../src/upstream/cursor-api");
+  __setCursorTransport(async (url, headers, body) => {
+    assert.equal(
+      url,
+      "https://api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools",
+    );
+    assert.equal(headers.Authorization, "Bearer cursor-access");
+    assert.equal(headers["Content-Type"], "application/connect+proto");
+    assert.equal(headers["Connect-Protocol-Version"], "1");
+    assert.ok(body instanceof Buffer && body.length > 5);
+    return {
+      status: 200,
+      headers: { "content-type": "application/connect+proto" },
+      body: Buffer.from(connectProtoTextFrame("hello from cursor")),
+    };
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+
+  t.after(async () => {
+    __setCursorTransport(null);
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const response = await requestText({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: {
+      Authorization: "Bearer test-key",
+      "Content-Type": "application/json",
+    },
+    body: {
+      model: "cursor-premium",
+      input: "hi",
+      stream: true,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(response.body, /event: response\.output_text\.delta/);
+  assert.match(response.body, /hello from cursor/);
+  assert.match(response.body, /event: response\.completed/);
+});
+
+test("cursor SSE forwards deltas as soon as upstream HTTP/2 chunks arrive (no whole-buffer wait)", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "cursor-access",
+      refreshToken: "cursor-refresh",
+      email: "stream@cursor.com",
+      accountUuid: "cursor-machine",
+      provider: "cursor",
+      cursorServiceMachineId: "cursor-machine",
+      cursorClientVersion: "cli-test",
+      cursorConfigVersion: "config-test",
+    }),
+  );
+
+  const { __setCursorTransport } = await import("../src/upstream/cursor-api");
+  // Build a streaming body that emits one Connect frame per chunk, with a
+  // gap between chunks. If callCursorResponses still buffered the whole
+  // upstream response, the second/third frames would only arrive together
+  // at the end and the deltaArrivalTimes timestamps would be tightly
+  // clustered. With a real stream they should be roughly `chunkGapMs`
+  // apart.
+  const chunkGapMs = 60;
+  const frames = [
+    Buffer.from(connectProtoTextFrame("first ")),
+    Buffer.from(connectProtoTextFrame("second ")),
+    Buffer.from(connectProtoTextFrame("third")),
+  ];
+  __setCursorTransport(async () => {
+    let i = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (i >= frames.length) {
+          controller.close();
+          return;
+        }
+        if (i > 0) await new Promise((r) => setTimeout(r, chunkGapMs));
+        controller.enqueue(new Uint8Array(frames[i++]));
+      },
+    });
+    return {
+      status: 200,
+      headers: { "content-type": "application/connect+proto" },
+      body: stream,
+    };
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    __setCursorTransport(null);
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const arrivals: number[] = [];
+  await new Promise<void>((resolve, reject) => {
+    const address = serverAddress(server);
+    const payload = JSON.stringify({
+      model: "cursor-default",
+      input: "hi",
+      stream: true,
+    });
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port: address.port,
+        method: "POST",
+        path: "/v1/responses",
+        headers: {
+          Authorization: "Bearer test-key",
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload).toString(),
+        },
+      },
+      (res) => {
+        const start = Date.now();
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => {
+          if (/response\.output_text\.delta/.test(chunk)) {
+            arrivals.push(Date.now() - start);
+          }
+        });
+        res.on("end", () => resolve());
+      },
+    );
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+
+  assert.ok(
+    arrivals.length >= 3,
+    `expected at least 3 streaming output_text deltas, got ${arrivals.length}`,
+  );
+  // Spread between first and last delta arrival should be at least roughly
+  // one inter-chunk gap. With a safety margin for CI jitter we require
+  // half the upstream gap × 2 (= one full gap).
+  const spread = arrivals[arrivals.length - 1] - arrivals[0];
+  assert.ok(
+    spread >= chunkGapMs,
+    `output_text.delta events arrived in ${spread}ms across ${arrivals.length} frames ` +
+      `(expected at least ${chunkGapMs}ms spread). The HTTP/2 transport ` +
+      `may have buffered the entire upstream response.`,
+  );
+});
+
+
+test("cursor /v1/messages emits Anthropic Messages SSE for bare model names in cursor-only mode", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "cursor-access",
+      refreshToken: "cursor-refresh",
+      email: "cursor-only@example.com",
+      accountUuid: "cursor-machine",
+      provider: "cursor",
+      cursorServiceMachineId: "cursor-machine",
+      cursorClientVersion: "cli-test",
+      cursorConfigVersion: "config-test",
+    }),
+  );
+
+  const { __setCursorTransport } = await import("../src/upstream/cursor-api");
+  __setCursorTransport(async (_url, _headers, _body) => ({
+    status: 200,
+    headers: { "content-type": "application/connect+proto" },
+    body: Buffer.from(connectProtoTextFrame("hello from cursor")),
+  }));
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    __setCursorTransport(null);
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const response = await requestText({
+    server,
+    method: "POST",
+    path: "/v1/messages",
+    headers: {
+      Authorization: "Bearer test-key",
+      "Content-Type": "application/json",
+    },
+    body: {
+      // Bare Anthropic-style name — no `cursor-` prefix.
+      model: "claude-sonnet-4-5",
+      max_tokens: 50,
+      messages: [{ role: "user", content: "hi" }],
+      stream: true,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(response.body, /event: message_start/);
+  assert.match(response.body, /"model":"claude-sonnet-4-5"/);
+  assert.match(response.body, /"type":"text_delta"/);
+  assert.match(response.body, /hello from cursor/);
+  assert.match(response.body, /event: message_stop/);
+});
+
+test("cursor /v1/chat/completions streaming emits OpenAI Chat SSE for bare model names", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "cursor-access",
+      refreshToken: "cursor-refresh",
+      email: "cursor-chat@example.com",
+      accountUuid: "cursor-machine",
+      provider: "cursor",
+      cursorServiceMachineId: "cursor-machine",
+      cursorClientVersion: "cli-test",
+      cursorConfigVersion: "config-test",
+    }),
+  );
+
+  const { __setCursorTransport } = await import("../src/upstream/cursor-api");
+  __setCursorTransport(async () => ({
+    status: 200,
+    headers: { "content-type": "application/connect+proto" },
+    body: Buffer.from(connectProtoTextFrame("hi from cursor chat")),
+  }));
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    __setCursorTransport(null);
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const response = await requestText({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: {
+      Authorization: "Bearer test-key",
+      "Content-Type": "application/json",
+    },
+    body: {
+      // Bare OpenAI-style name — no `cursor-` prefix; cursor-only mode
+      // routes it to cursor and the OpenAI Chat SSE generator emits
+      // chat.completion.chunk frames.
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "say hi" }],
+      stream: true,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(response.body, /"object":"chat\.completion\.chunk"/);
+  // Role primer chunk must come first so OpenAI SDKs that look for the
+  // initial role marker accept the stream.
+  assert.match(response.body, /"role":"assistant"/);
+  // Content delta must appear and carry our text.
+  assert.match(response.body, /"content":"hi from cursor chat"/);
+  // Stream must end with finish_reason and the [DONE] sentinel.
+  assert.match(response.body, /"finish_reason":"stop"/);
+  assert.match(response.body, /data: \[DONE\]/);
+});
+
+test("cursor /v1/chat/completions non-streaming aggregates SSE into chat.completion JSON", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "cursor-access",
+      refreshToken: "cursor-refresh",
+      email: "cursor-chat-nonstream@example.com",
+      accountUuid: "cursor-machine",
+      provider: "cursor",
+      cursorServiceMachineId: "cursor-machine",
+      cursorClientVersion: "cli-test",
+      cursorConfigVersion: "config-test",
+    }),
+  );
+
+  const { __setCursorTransport } = await import("../src/upstream/cursor-api");
+  // Two text frames so we exercise aggregation.
+  __setCursorTransport(async () => ({
+    status: 200,
+    headers: { "content-type": "application/connect+proto" },
+    body: Buffer.concat([
+      Buffer.from(connectProtoTextFrame("foo")),
+      Buffer.from(connectProtoTextFrame(" bar")),
+    ]),
+  }));
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    __setCursorTransport(null);
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const response = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: {
+      Authorization: "Bearer test-key",
+      "Content-Type": "application/json",
+    },
+    body: {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "two parts please" }],
+      // Explicitly non-streaming — provider streams internally and the
+      // handler aggregates into a single chat.completion JSON.
+      stream: false,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.object, "chat.completion");
+  assert.equal(response.body.model, "gpt-4o");
+  assert.equal(response.body.choices[0].message.role, "assistant");
+  assert.equal(response.body.choices[0].message.content, "foo bar");
+  assert.equal(response.body.choices[0].finish_reason, "stop");
+});
+
+// Helper: build a Responses-API SSE body that the codex backend would send
+// back. Used to drive smoke tests for the codex chat-completions /
+// messages translator handlers.
+function codexResponsesSseBody(textParts: string[]): string {
+  const ev = (event: string, data: unknown) =>
+    `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  let out = ev("response.created", {
+    type: "response.created",
+    response: { id: "resp_x", status: "in_progress" },
+  });
+  for (const t of textParts) {
+    out += ev("response.output_text.delta", {
+      type: "response.output_text.delta",
+      delta: t,
+    });
+  }
+  out += ev("response.completed", {
+    type: "response.completed",
+    response: {
+      id: "resp_x",
+      status: "completed",
+      usage: { input_tokens: 3, output_tokens: 4 },
+    },
+  });
+  return out;
+}
+
+test("codex /v1/chat/completions translates Chat → Responses upstream and SSE → Chat back", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-chat@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  let receivedUpstreamBody: any = null;
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      "https://chatgpt.com/backend-api/codex/responses",
+    );
+    receivedUpstreamBody = JSON.parse(String(init?.body || "{}"));
+    return new Response(codexResponsesSseBody(["foo", " bar"]), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  // Streaming.
+  const streamResp = await requestText({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      messages: [
+        { role: "system", content: "Be terse." },
+        { role: "user", content: "say hi" },
+      ],
+      stream: true,
+    },
+  });
+  assert.equal(streamResp.status, 200);
+  // Translated upstream body must be Responses-shaped: input array (not
+  // messages), instructions lifted from system, stream:true forced on.
+  assert.ok(Array.isArray(receivedUpstreamBody.input));
+  assert.equal(receivedUpstreamBody.instructions, "Be terse.");
+  assert.equal(receivedUpstreamBody.stream, true);
+  // Codex-strip: max_output_tokens must NOT be sent.
+  assert.equal(receivedUpstreamBody.max_output_tokens, undefined);
+  // Output is Chat Completions SSE.
+  assert.match(streamResp.body, /"object":"chat\.completion\.chunk"/);
+  assert.match(streamResp.body, /"role":"assistant"/);
+  assert.match(streamResp.body, /"content":"foo"/);
+  assert.match(streamResp.body, /"content":" bar"/);
+  assert.match(streamResp.body, /"finish_reason":"stop"/);
+  assert.match(streamResp.body, /data: \[DONE\]/);
+
+  // Non-streaming aggregates the same upstream stream into JSON.
+  const jsonResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "say hi" }],
+      stream: false,
+    },
+  });
+  assert.equal(jsonResp.status, 200);
+  assert.equal(jsonResp.body.object, "chat.completion");
+  assert.equal(jsonResp.body.choices[0].message.content, "foo bar");
+  assert.equal(jsonResp.body.choices[0].finish_reason, "stop");
+});
+
+test("codex /v1/messages translates Anthropic → Responses upstream and SSE → Anthropic back", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-msg@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  let receivedUpstreamBody: any = null;
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      "https://chatgpt.com/backend-api/codex/responses",
+    );
+    receivedUpstreamBody = JSON.parse(String(init?.body || "{}"));
+    return new Response(codexResponsesSseBody(["ack"]), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  // Streaming.
+  const streamResp = await requestText({
+    server,
+    method: "POST",
+    path: "/v1/messages",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      max_tokens: 50,
+      system: "You are helpful.",
+      messages: [{ role: "user", content: "Reply: ack" }],
+      stream: true,
+    },
+  });
+  assert.equal(streamResp.status, 200);
+  // Upstream body checks.
+  assert.equal(receivedUpstreamBody.instructions, "You are helpful.");
+  assert.ok(Array.isArray(receivedUpstreamBody.input));
+  assert.equal(receivedUpstreamBody.stream, true);
+  // max_output_tokens stripped (anthropic max_tokens must not pass through).
+  assert.equal(receivedUpstreamBody.max_output_tokens, undefined);
+  // Output is Anthropic Messages SSE.
+  assert.match(streamResp.body, /event: message_start/);
+  assert.match(streamResp.body, /"model":"gpt-5.5"/);
+  assert.match(streamResp.body, /"type":"text_delta","text":"ack"/);
+  assert.match(streamResp.body, /event: message_stop/);
+
+  // Non-streaming.
+  const jsonResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/messages",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      max_tokens: 50,
+      messages: [{ role: "user", content: "say hi" }],
+    },
+  });
+  assert.equal(jsonResp.status, 200);
+  assert.equal(jsonResp.body.role, "assistant");
+  assert.equal(jsonResp.body.type, "message");
+  assert.equal(jsonResp.body.content[0].type, "text");
+  assert.equal(jsonResp.body.content[0].text, "ack");
+  assert.equal(jsonResp.body.stop_reason, "end_turn");
+});
+
+test("codex /v1/responses sanitises body, forces upstream stream:true, and aggregates non-stream", async (t) => {
+  // Regression cover for the "Codex Responses passthrough still violates new
+  // streaming contract" review: client may send public-Responses fields like
+  // max_output_tokens/parallel_tool_calls or stream:false, but the codex
+  // backend rejects all of those. The handler must strip them, force the
+  // upstream to stream, and aggregate locally if the client wanted JSON.
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-resp@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  let receivedUpstreamBody: any = null;
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      "https://chatgpt.com/backend-api/codex/responses",
+    );
+    receivedUpstreamBody = JSON.parse(String(init?.body || "{}"));
+    return new Response(codexResponsesSseBody(["pong"]), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  // Client sends stream:false plus the two fields codex-backend rejects.
+  // We expect:
+  //   - upstream body was sanitised (no max_output_tokens / parallel_tool_calls)
+  //   - upstream body has stream:true (forced by the handler)
+  //   - response is a single Responses JSON, not SSE
+  const jsonResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "ping" }] },
+      ],
+      max_output_tokens: 64,
+      parallel_tool_calls: false,
+      stream: false,
+    },
+  });
+  assert.equal(jsonResp.status, 200);
+  assert.equal(receivedUpstreamBody.stream, true);
+  assert.equal(receivedUpstreamBody.max_output_tokens, undefined);
+  assert.equal(receivedUpstreamBody.parallel_tool_calls, undefined);
+  // The handler emits the completed response verbatim — id/status/usage all
+  // come straight from the upstream's response.completed event.
+  assert.equal(jsonResp.body.id, "resp_x");
+  assert.equal(jsonResp.body.status, "completed");
+  assert.deepEqual(jsonResp.body.usage, { input_tokens: 3, output_tokens: 4 });
+
+  // And streaming clients still get the SSE forwarded as-is.
+  const streamResp = await requestText({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "ping" }] },
+      ],
+      max_output_tokens: 64,
+      stream: true,
+    },
+  });
+  assert.equal(streamResp.status, 200);
+  // Sanitisation applies to the streaming path too.
+  assert.equal(receivedUpstreamBody.max_output_tokens, undefined);
+  assert.equal(receivedUpstreamBody.stream, true);
+  assert.match(streamResp.body, /event: response\.output_text\.delta/);
+  assert.match(streamResp.body, /"delta":"pong"/);
+  assert.match(streamResp.body, /event: response\.completed/);
+});
+
+test("codex /v1/chat/completions non-stream still captures final SSE event when upstream omits trailing newline", async (t) => {
+  // Regression cover for the "SSE drain drops final buffered line" review:
+  // the previous hand-rolled drain loops would skip the very last `data:`
+  // line if it lacked a trailing \n. We now use the shared readSseEvents
+  // helper which flushes the leftover buffer on stream close.
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-drain@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  // Build an SSE body whose final event has NO trailing \n\n.
+  const ev = (event: string, data: unknown) =>
+    `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const sseNoTrailingNewline =
+    ev("response.created", { response: { id: "resp_x", status: "in_progress" } }) +
+    ev("response.output_text.delta", { delta: "answer" }) +
+    `event: response.completed\ndata: ${JSON.stringify({
+      response: {
+        id: "resp_x",
+        status: "completed",
+        usage: { input_tokens: 1, output_tokens: 2 },
+      },
+    })}`; // ← deliberately no trailing newline
+
+  const restoreFetch = withMockedFetch(async () => {
+    return new Response(sseNoTrailingNewline, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const jsonResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "q" }],
+      stream: false,
+    },
+  });
+  assert.equal(jsonResp.status, 200);
+  // The final delta survives the drain.
+  assert.equal(jsonResp.body.choices[0].message.content, "answer");
+  // And the response.completed-derived finish_reason makes it through.
+  assert.equal(jsonResp.body.choices[0].finish_reason, "stop");
+});
+
+test("codex /v1/responses non-stream splices streamed output_item.done into completed.output (real codex wire shape)", async (t) => {
+  // Real codex backend ships output items (message / reasoning /
+  // function_call) in dedicated `response.output_item.done` events
+  // during the stream, and then sends a final `response.completed`
+  // whose `response.output` is **always `[]`** (it differs from the
+  // public OpenAI Responses API in that respect). The handler must
+  // reconstruct the final response by splicing the streamed items
+  // into the empty array so non-stream clients actually get the
+  // generated content.
+  //
+  // Without the splice, our `/v1/responses` non-stream path would
+  // hand back `output: []` plus correct usage — clients would see a
+  // successful 200 with no content. The unit tests cover the drain
+  // helper end of this contract; this smoke locks the handler-level
+  // splice behaviour so a future refactor can't silently regress
+  // the wire-format reconstruction.
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-splice@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  // Faithful slice of a real codex stream: a reasoning item, a
+  // message item, and a function_call item — each delivered as a
+  // separate `response.output_item.done` event — followed by a
+  // `response.completed` whose `output` is intentionally empty.
+  const ev = (event: string, data: unknown) =>
+    `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const reasoningItem = {
+    id: "rs_1",
+    type: "reasoning",
+    summary: [{ type: "summary_text", text: "thinking briefly" }],
+  };
+  const messageItem = {
+    id: "msg_1",
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text: "PONG", annotations: [] }],
+  };
+  const functionCallItem = {
+    id: "fc_1",
+    type: "function_call",
+    status: "completed",
+    call_id: "call_xyz",
+    name: "get_weather",
+    arguments: "{\"city\":\"Tokyo\"}",
+  };
+
+  const sseBody =
+    ev("response.created", {
+      response: { id: "resp_splice", status: "in_progress" },
+    }) +
+    ev("response.output_item.done", { item: reasoningItem }) +
+    ev("response.output_item.done", { item: messageItem }) +
+    ev("response.output_item.done", { item: functionCallItem }) +
+    ev("response.completed", {
+      response: {
+        id: "resp_splice",
+        object: "response",
+        status: "completed",
+        model: "gpt-5.5",
+        output: [], // ← codex's actual wire behaviour
+        usage: { input_tokens: 17, output_tokens: 9 },
+      },
+    });
+
+  const restoreFetch = withMockedFetch(async () => {
+    return new Response(sseBody, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const jsonResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "ping" }] },
+      ],
+      stream: false,
+    },
+  });
+
+  assert.equal(jsonResp.status, 200);
+  assert.equal(jsonResp.body.id, "resp_splice");
+  assert.equal(jsonResp.body.status, "completed");
+  // The handler-level splice: completed.response.output was [] but
+  // we should have stitched the three streamed items in order.
+  assert.ok(
+    Array.isArray(jsonResp.body.output),
+    "output must be an array",
+  );
+  assert.equal(
+    jsonResp.body.output.length,
+    3,
+    `expected 3 output items spliced from output_item.done events, got ${jsonResp.body.output.length}`,
+  );
+  assert.equal(jsonResp.body.output[0].type, "reasoning");
+  assert.equal(jsonResp.body.output[0].summary[0].text, "thinking briefly");
+  assert.equal(jsonResp.body.output[1].type, "message");
+  assert.equal(jsonResp.body.output[1].content[0].text, "PONG");
+  assert.equal(jsonResp.body.output[2].type, "function_call");
+  assert.equal(jsonResp.body.output[2].call_id, "call_xyz");
+  assert.equal(jsonResp.body.output[2].arguments, "{\"city\":\"Tokyo\"}");
+  // Usage from completed.response is preserved.
+  assert.deepEqual(jsonResp.body.usage, {
+    input_tokens: 17,
+    output_tokens: 9,
+  });
+});
+
+test("codex /v1/responses non-stream prefers upstream-populated output over streamed items (defensive)", async (t) => {
+  // The handler's splice is conditional: if a future codex backend
+  // ever starts populating `response.completed.response.output`
+  // itself (matching the public Responses contract), we should
+  // honour that array instead of double-emitting items we also
+  // captured from the stream. This test pins that precedence so
+  // we don't accidentally regress to "always overwrite with
+  // streamed items" if someone simplifies the splice logic.
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-splice2@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  const ev = (event: string, data: unknown) =>
+    `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const streamedItem = {
+    id: "msg_streamed",
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: "FROM_STREAM" }],
+  };
+  const completedItem = {
+    id: "msg_completed",
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: "FROM_COMPLETED" }],
+  };
+  const sseBody =
+    ev("response.output_item.done", { item: streamedItem }) +
+    ev("response.completed", {
+      response: {
+        id: "resp_x",
+        status: "completed",
+        output: [completedItem],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    });
+
+  const restoreFetch = withMockedFetch(async () => {
+    return new Response(sseBody, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const jsonResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "ping" }] },
+      ],
+      stream: false,
+    },
+  });
+
+  assert.equal(jsonResp.status, 200);
+  // When upstream supplies output already, it wins.
+  assert.equal(jsonResp.body.output.length, 1);
+  assert.equal(jsonResp.body.output[0].id, "msg_completed");
+  assert.equal(
+    jsonResp.body.output[0].content[0].text,
+    "FROM_COMPLETED",
+  );
 });

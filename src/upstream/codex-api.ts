@@ -1,6 +1,7 @@
 import { Request } from "express";
 import { Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
+import { withTimeoutSignal } from "../utils/abort";
 
 const BASE_URL = "https://chatgpt.com/backend-api";
 const RESPONSES_PATH = "/codex/responses";
@@ -92,6 +93,7 @@ export interface CallCodexResponsesOptions {
   request: Request;
   account: AvailableAccount;
   config: Config;
+  signal?: AbortSignal;
 }
 
 export async function callCodexResponses(
@@ -110,7 +112,7 @@ export async function callCodexResponses(
       method: "POST",
       headers: buildHeaders(account, stream, config),
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: withTimeoutSignal(timeoutMs, options.signal),
     });
   } catch (err: any) {
     // undici's "fetch failed" hides the real cause — surface it.

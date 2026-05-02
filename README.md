@@ -2,11 +2,11 @@
 
 [中文](./README_CN.md)
 
-A lightweight OAuth-to-API proxy that turns your Claude (Anthropic) and ChatGPT (OpenAI Codex) subscriptions into usable API endpoints for Claude Code and OpenAI-compatible clients.
+A lightweight OAuth-to-API proxy that turns your Claude (Anthropic), ChatGPT (OpenAI Codex), and experimental local Cursor login into usable API endpoints for Claude Code and OpenAI-compatible clients.
 
 auth2api is intentionally small and focused:
 
-- bring your own Claude / ChatGPT login
+- bring your own Claude / ChatGPT / Cursor login
 - one local or self-hosted proxy
 - automatic per-provider routing by model name
 
@@ -15,7 +15,7 @@ It is not trying to be a large multi-provider gateway. If you want a compact, un
 ## Features
 
 - **Lightweight by design** — small codebase, minimal moving parts
-- **Two providers, one proxy** — Claude OAuth and OpenAI Codex (ChatGPT) OAuth coexist; per-provider account pools, cooldown, refresh, and stats
+- **Multiple providers, one proxy** — Claude OAuth, OpenAI Codex (ChatGPT) OAuth, and an experimental Cursor local-login provider coexist; per-provider account pools, cooldown, refresh, and stats
 - **OpenAI-compatible API** — supports `/v1/chat/completions`, `/v1/responses`, and `/v1/models`
 - **Claude native passthrough** — supports `/v1/messages` and `/v1/messages/count_tokens`
 - **Claude Code friendly** — works with both `Authorization: Bearer` and `x-api-key`
@@ -39,10 +39,11 @@ npm run build
 
 ## Login
 
-auth2api supports two upstream providers:
+auth2api supports these upstream providers:
 
 - `anthropic` — Claude OAuth (default). Used for `claude-*` models.
 - `codex` — OpenAI's "Sign in with ChatGPT" OAuth, talking to the official codex backend at `https://chatgpt.com/backend-api/codex/responses`. Used for `gpt-5*` (incl. `gpt-5-codex`), `o\d*`, and `codex-*` models. Requires a **ChatGPT Plus or Pro** subscription — Free accounts authenticate but the first call fails with `model not supported`.
+- `cursor` — experimental Cursor account, authorized either through a browser deep-link PKCE flow (default) or by importing the local Cursor desktop login. **Routing**: in multi-provider setups Cursor only serves models with an explicit `cursor-*` or `cr/*` prefix. In **Cursor-exclusive mode** (only Cursor is logged in, no `anthropic`/`codex` accounts), every request — including bare `claude-*` or `gpt-*` model names — is auto-routed through Cursor so off-the-shelf Claude Code / OpenAI clients work without a prefix.
 
 Pick the provider with `--provider=`. Default is `anthropic`.
 
@@ -54,9 +55,16 @@ node dist/index.js --login
 
 # Codex (ChatGPT Plus/Pro)
 node dist/index.js --login --provider=codex
+
+# Cursor (experimental; opens a browser to authorize your Cursor account)
+node dist/index.js --login --provider=cursor
+
+# Cursor — fall back to importing the local Cursor desktop login instead of using the browser
+node dist/index.js --login --provider=cursor --cursor-import-local
+node dist/index.js --login --provider=cursor --cursor-storage=/path/to/state.vscdb
 ```
 
-Opens a browser URL. After authorizing, the callback is handled automatically. The Anthropic flow uses port `54545`; the Codex flow uses port `1455` — make sure neither is blocked by your firewall.
+Anthropic and Codex open a browser URL. After authorizing, the callback is handled automatically. The Anthropic flow uses port `54545`; the Codex flow uses port `1455` — make sure neither is blocked by your firewall. Cursor uses a different "deep-link" PKCE flow: it prints a `https://cursor.com/loginDeepControl?...` URL, you click "Yes, Log In" in your browser, and `auth2api` polls `api2.cursor.sh/auth/poll` until the token is issued — no callback port required. Pass `--cursor-import-local` (or `--cursor-storage=...`) if you'd rather pull the existing token out of your Cursor desktop install.
 
 ### Manual mode (for remote servers)
 
@@ -67,9 +75,11 @@ node dist/index.js --login --provider=codex --manual
 
 Open the printed URL in your browser. After authorizing, your browser will redirect to a `localhost` URL that fails to load — copy the full URL from the address bar and paste it back into the terminal.
 
-You can log in to both providers; auth2api stores tokens side-by-side in `auth-dir` (`claude-<email>.json` and `codex-<email>.json`) and routes inbound requests to the matching pool by model name. Logging in to only one provider is fine — the other simply has no advertised models.
+You can log in to multiple providers; auth2api stores tokens side-by-side in `auth-dir` (`claude-<email>.json`, `codex-<email>.json`, and `cursor-<email>.json`) and routes inbound requests to the matching pool by model name. Logging in to only one provider is fine — the others simply have no advertised models.
 
 > **Note on Codex:** The codex provider relays your ChatGPT Plus/Pro subscription quota. OpenAI's ToS does not officially permit relaying ChatGPT sessions through third-party tools — use this for your own personal local consumption only.
+
+> **Note on Cursor:** The cursor provider is a research-only integration built from non-public, reverse-engineered Cursor APIs (`api2.cursor.sh` over HTTP/2, Connect-RPC + protobuf). It may break when Cursor changes client versions, may violate Cursor's terms, and should be used only for local personal experiments.
 
 ## Starting the server
 
@@ -123,6 +133,17 @@ The default request body limit is `200mb`, which is more suitable for large Clau
 - `errors`: log upstream/network failures and upstream error bodies
 - `verbose`: include `errors` logs plus per-request method, path, status, and duration
 
+Cursor's reverse-engineered headers can be overridden if the upstream version gate changes. `agent-base-url` is the legacy alias for the chat host; both keys point at the same backend now (`api2.cursor.sh`).
+
+```yaml
+cloaking:
+  cursor:
+    client-version: "2.3.41"
+    client-type: "ide"
+    agent-base-url: "https://api2.cursor.sh"
+    api-base-url: "https://api2.cursor.sh"
+```
+
 ## Usage
 
 Use any OpenAI-compatible client pointed at `http://127.0.0.1:8317`:
@@ -140,7 +161,7 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 ### Available models
 
-`GET /v1/models` lists only models for providers you've actually logged in to. The codex list is **fetched live** from `chatgpt.com/backend-api/codex/models` (cached 5 minutes, ETag-aware) so it always matches what your account can actually serve. The current ChatGPT-account-supported set at the time of writing:
+`GET /v1/models` lists only models for providers you've actually logged in to. The codex list is **fetched live** from `chatgpt.com/backend-api/codex/models` (cached 5 minutes, ETag-aware) so it always matches what your account can actually serve. Cursor models are fetched from Cursor's internal AvailableModels endpoint when possible, with a small fallback list. The current ChatGPT-account-supported set at the time of writing:
 
 | Model ID | Provider | Description |
 |----------|----------|-------------|
@@ -154,6 +175,10 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 | `gpt-5.4-mini` | codex | GPT-5.4 Mini |
 | `gpt-5.3-codex` | codex | GPT-5.3 (Codex variant) |
 | `gpt-5.2` | codex | GPT-5.2 |
+| `cursor-claude-opus-4-7-medium` | cursor | Claude Opus 4.7 routed through Cursor |
+| `cursor-claude-sonnet-4-7-medium` | cursor | Claude Sonnet 4.7 routed through Cursor |
+| `cursor-default` | cursor | Cursor "Auto" model |
+| `cursor-premium` / `cursor-fast` / `cursor-composer` | cursor | Fallback ids when AvailableModels can't be reached |
 
 Short convenience aliases accepted by auth2api:
 
@@ -161,20 +186,55 @@ Short convenience aliases accepted by auth2api:
 - `sonnet` -> `claude-sonnet-4-6`
 - `haiku` -> `claude-haiku-4-5-20251001`
 
-Routing: requests are dispatched to the matching pool by model name. `claude-*` and the bare aliases (`opus`/`sonnet`/`haiku`) hit your Claude account; `gpt-5*`, `o\d` (`o3`, `o4-mini`, …), and `codex-*` hit your Codex account. Other model families (`gpt-3.5-*`, `gpt-4*`, …) are not served by either backend and route to anthropic by default. If you haven't logged into the matching provider, the request returns `503 no_account_for_provider` with the exact `--login` command to fix it.
+Routing: requests are dispatched to the matching pool by model name. `claude-*` and the bare aliases (`opus`/`sonnet`/`haiku`) hit your Claude account; `gpt-5*`, `o\d` (`o3`, `o4-mini`, …), and `codex-*` hit your Codex account; `cursor-*` and `cr/*` hit your Cursor account. Other model families (`gpt-3.5-*`, `gpt-4*`, …) are not served by either backend and route to anthropic by default. If you haven't logged into the matching provider, the request returns `503 no_account_for_provider` with the exact `--login` command to fix it.
+
+#### "Cursor exclusive" mode (zero-config Claude Code / OpenAI clients)
+
+When **only Cursor has a logged-in account** (anthropic and codex are both empty), every model name routes to Cursor automatically — `cursor-` prefix becomes optional. This is what makes a Cursor-only auth2api a drop-in replacement for the Anthropic API or the OpenAI API:
+
+| Client behaviour | What auth2api does |
+|---|---|
+| `POST /v1/messages` `{"model":"claude-sonnet-4-5"}` | routes through Cursor and re-encodes the upstream stream as Anthropic Messages SSE |
+| `POST /v1/messages` `{"model":"opus"}` | maps `opus` → `claude-opus-4-7-medium` on Cursor, returns Anthropic Messages SSE |
+| `POST /v1/responses` `{"model":"gpt-5.5"}` | maps to `gpt-5.5-medium` on Cursor, returns OpenAI Responses SSE |
+| `POST /v1/chat/completions` `{"model":"claude-haiku-4-5"}` | maps to `claude-4.5-haiku` on Cursor |
+
+A small built-in alias table covers the names Anthropic / OpenAI SDKs and Claude Code use by default (`claude-sonnet-4-5`, `claude-opus-4-7`, `opus`, `sonnet`, `haiku`, `gpt-5.5`, `o3`, …) and translates them to Cursor's internal SKUs (`claude-4.5-sonnet`, `claude-opus-4-7-medium`, `gpt-5.5-medium`, …). Set `CURSOR_MODEL_ALIASES="my-name=claude-opus-4-7-max,foo=composer-2"` to extend the table without forking. Anything not in the table is passed through verbatim, so you can still hit Cursor's full SKU catalogue (e.g. `claude-opus-4-7-thinking-max`).
+
+When **more than one provider has accounts**, the historical routing table above applies — explicit prefixes (`cursor-`, `cr/`) still force Cursor, but `claude-*` goes to your Anthropic OAuth account.
+
+##### Anthropic SSE for Claude Code on Cursor
+
+`POST /v1/messages` against a Cursor-served model emits the Anthropic Messages SSE format (`message_start` → `content_block_start`/`content_block_delta` → `message_delta` → `message_stop`). Reasoning bytes from thinking-enabled models are routed to a `thinking` content block before the final `text` block, matching Claude Code's expectations. Streaming is forced on (Cursor only supports streaming), so non-streaming `/v1/messages` requests still get an SSE response when the upstream is Cursor.
 
 ### Endpoint × provider support matrix
 
-| Endpoint | anthropic | codex |
-|----------|-----------|-------|
-| `POST /v1/chat/completions` | ✅ | ❌ (use `/v1/responses` — translation pending) |
-| `POST /v1/responses` | ✅ | ✅ (passthrough) |
-| `POST /v1/messages` | ✅ | ❌ |
-| `POST /v1/messages/count_tokens` | ✅ | ❌ (501) |
+| Endpoint | anthropic | codex | cursor |
+|----------|-----------|-------|--------|
+| `POST /v1/chat/completions` | ✅ | ✅ (Chat ↔ Responses translator — reasoning as `reasoning_content`) | ✅ (`chat.completion.chunk` SSE; reasoning as `reasoning_content`) |
+| `POST /v1/responses` | ✅ | ✅ (passthrough) | ✅ |
+| `POST /v1/messages` | ✅ | ✅ (Anthropic ↔ Responses translator — see below) | ✅ (Anthropic Messages SSE — see below) |
+| `POST /v1/messages/count_tokens` | ✅ | ❌ (501) | ❌ (501) |
+
+For Cursor all three OpenAI-compatible endpoints are wired natively: `req.path` selects the wire format the cursor provider emits (`openai-chat-completions`, `openai-responses`, or `anthropic-messages`). Non-streaming `/v1/chat/completions` aggregates the upstream stream into a single `chat.completion` JSON response.
+
+For Codex (ChatGPT-account backend) the same coverage is achieved through a dedicated Chat ↔ Responses ↔ Anthropic translator pair (`src/upstream/responses-translator.ts`): incoming Chat or Anthropic requests are translated to OpenAI Responses upstream, the streaming Responses SSE response is translated back to the original wire format, and non-streaming requests aggregate the SSE locally before responding. Tool calls, system prompts (lifted into `instructions`), `reasoning_effort`/`thinking`, multi-turn conversations and `response_format` `json_schema` are all supported. Codex-specific incompatibilities (`max_output_tokens`, `parallel_tool_calls`) are stripped automatically in the codex handler — you don't have to think about them.
 
 #### Codex `/v1/responses` body requirements
 
-The ChatGPT codex backend rejects requests that don't include `stream: true`, `store: false`, and `instructions`. auth2api **auto-fills these defaults** when the client doesn't send them, so off-the-shelf OpenAI Responses clients just work. If you set any of these explicitly (e.g. `stream: false`), your value is preserved and the upstream's "Stream must be set to true" error is forwarded as-is.
+The ChatGPT codex backend rejects requests that don't include `stream: true`, `store: false`, and `instructions`, and 400s on a couple of public Responses fields (`max_output_tokens`, `parallel_tool_calls`). auth2api applies the same sanitize-and-force-stream pattern to all three codex endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`):
+
+- `store: false` and `instructions: ""` are auto-filled when the client omits them.
+- `max_output_tokens` and `parallel_tool_calls` are stripped — the backend caps tokens by your ChatGPT plan instead.
+- The upstream call is **always** made with `stream: true` regardless of the client's `stream` value. If the client asked for `stream: false`, auth2api drains the upstream SSE locally and returns a single JSON body in the requested wire format (Responses, Chat Completions, or Anthropic Messages) — including stitching `response.output_item.done` items into `output` because codex's `response.completed.response.output` is always `[]`.
+
+Off-the-shelf OpenAI Responses / Chat / Claude Code clients all just work without knowing about codex's quirks.
+
+#### Cursor `/v1/responses` limitations
+
+Cursor's chat protocol is reverse-engineered: requests go to `api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools` over HTTP/2 + `application/connect+proto`, and the response is decoded back into OpenAI Responses SSE deltas. Stream is forced on (Cursor only supports streaming). Tool calls, images, repository context, edit actions, and Cursor's richer agent protocol are intentionally not translated yet — only single-turn streaming text is supported.
+
+The decoder routes Cursor's chain-of-thought (`reasoning`) bytes to `response.reasoning_summary_text.delta` events instead of leaking them into the main `response.output_text.delta` stream. For Composer/Kimi-style models that stream the entire response (CoT + answer) through a single reasoning channel, the decoder splits on the first `</think>` marker so the final answer still surfaces as plain `output_text`.
 
 ### Endpoints
 
