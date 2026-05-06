@@ -1,58 +1,22 @@
-host: ""
+host: "0.0.0.0"
 port: 8317
-
-# Directory to store OAuth tokens
-auth-dir: "~/.auth2api"
-
-# API keys for client authentication (clients use these to access this proxy)
+auth-dir: "/root/.auth2api"
 api-keys:
-  - "your-api-key-here"
-
-# Maximum JSON request body size
+  - "sk-auth2api-x7mK9pQnR4vL2wJ8hF5tY3cB6eN1uA0s"
 body-limit: "200mb"
-
-# Upstream request timeouts
 timeouts:
-  messages-ms: 120000         # non-stream /v1/messages timeout
-  stream-messages-ms: 600000  # stream /v1/messages timeout, suitable for Claude Code long tasks
-  count-tokens-ms: 30000      # /v1/messages/count_tokens timeout
-
-# Debug logging level:
-# off = no extra logs
-# errors = upstream/network failure details
-# verbose = errors + per-request access logs
+  messages-ms: 120000
+  stream-messages-ms: 600000
+  count-tokens-ms: 30000
 debug: "off"
-
-# Request fingerprinting — controls how auth2api mimics Claude Code CLI
-# These settings affect the User-Agent, billing header, and fingerprint
 cloaking:
-  # CLI version to impersonate (default: 2.1.88)
-  # This affects User-Agent and the fingerprint in billing-header
   cli-version: "2.1.88"
-
-  # Entrypoint for billing attribution (default: cli)
-  # Claude Code uses: cli, mcp, sdk, etc.
   entrypoint: "cli"
-
-  # Codex (ChatGPT) provider — protocol-required header strings.
-  # NOT identity faking; these mirror what the official codex CLI sends.
-  # The cli-version drives BOTH the User-Agent suffix and the explicit
-  # `version` HTTP header — the backend version-gates some models on it
-  # ("requires a newer version of Codex" 400). Bump if you see that error;
-  # `npm view @openai/codex version` shows the current released version.
   codex:
-    # Full User-Agent string, takes precedence over the components below.
-    # user-agent: "codex_cli_rs/0.125.0 (macos; arm64)"
     originator: "codex_cli_rs"
     cli-version: "0.125.0"
-    # Set only if the upstream begins requiring an OpenAI-Beta header.
-    # openai-beta: "responses=experimental"
-
-  # Cursor provider — experimental, reverse-engineered, and not official.
-  # Override these only when Cursor changes its internal version gates.
   cursor:
     client-version: "2.3.41"
     client-type: "ide"
-    # agent-base-url is the legacy alias; both keys point at api2.cursor.sh now.
     agent-base-url: "https://api2.cursor.sh"
     api-base-url: "https://api2.cursor.sh"
