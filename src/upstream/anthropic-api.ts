@@ -119,7 +119,7 @@ function buildHeaders(
     // Capitalized headers
     "Content-Type": "application/json",
     Authorization: `Bearer ${token}`,
-    "User-Agent": `claude-cli/${cliVersion} (external, ${entrypoint})`,
+    "User-Agent": `claude-cli/${cliVersion} (internal, ${entrypoint})`,
     "X-Claude-Code-Session-Id": sessionID,
     "X-Stainless-Lang": "js",
     "X-Stainless-Package-Version": "0.74.0",
